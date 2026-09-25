@@ -42,8 +42,14 @@ SpectrumDG/
 │
 ├── lib/                    # 训练/评估工具
 │   ├── trainer.py          #   两阶段训练器 (早停 + SWAD + DG 组合)
-│   ├── evaluate.py         #   in-domain / cross-domain MSE+NMSE 评估
+│   ├── evaluate.py         #   in-domain / cross-domain MSE+NMSE 评估 + 简单阈值门控
 │   └── dg.py               #   DG 组件 (Fish 梯度惩罚, SWAD 平均, CIRL 辅助损失)
+│
+├── scripts/                # 工具脚本
+│   ├── eval_multi_prior_gate.py   # 多物理先验门控评估 (建筑+高程)
+│   ├── multi_prior_gate.py        # 门控诊断工具 (特征 AUROC + 规则对比)
+│   ├── gate_diag.py               # 瓶颈特征马氏距离诊断
+│   └── input_gate_diag.py         # 输入空间建筑覆盖率诊断
 │
 ├── run/                    # 实验产物 (模型权重 + 训练日志 + DG 报告)
 │   ├── baseline_3urban/
@@ -58,7 +64,8 @@ SpectrumDG/
     ├── project_overview.md          # 本文档
     ├── attention_unet_two_stage.md  # 架构详细说明
     ├── improvement_approach.md      # 改进策略说明
-    └── validation_results.md        # 实验验证结果
+    ├── validation_results.md        # 实验验证结果
+    └── gate_mechanism.md            # 门控机制设计与验证
 ```
 
 ## 4. 数据流
@@ -136,14 +143,22 @@ Tx 位置 → log-distance 邻近图 → 归一化 → Tx 邻近输入
 | CIRL | 0.3417 | -20.6% |
 | Fish | 0.3461 | -19.6% |
 
-### 7.2 CBAM 骨干两阶段 (4to4, 无 DG)
+### 7.2 最终方案对比 (4to4, CBAM 骨干)
 
-| 指标 | indomain | cross_avg |
-|---|---|---|
-| NMSE_firstU | 0.2225 | 0.7743 |
-| NMSE_secondU | 0.2209 | 0.8206 |
+| 版本 | 域内 NMSE ↓ | 跨域 NMSE ↓ | 说明 |
+|------|-------------|-------------|------|
+| 基线 (无DG无门控) | 0.2209 | 0.8206 | CBAM U-Net, ERM |
+| DG 无门控 | 0.2482 | 0.6787 | CBAM + CIRL + Fish |
+| **DG + 多先验门控** | **0.2477** | **0.6122** | 建筑+高程组合规则 |
 
-CBAM 骨干域内精度提升 32.6%（对比旧骨干 Baseline 0.3298）。
+**总体改进**: 跨域泛化提升 **25.4%**，域内损失 12.1%
+
+### 7.3 门控机制
+
+采用多物理先验融合硬路由（详见 [gate_mechanism.md](gate_mechanism.md)）：
+- **信号**: 建筑覆盖率 + 地形高程
+- **规则**: `bldg_strong OR (elev_low AND bldg_weak)` → secondU，否则 → firstU
+- **准确率**: 90.7%（零训练，可解释）
 
 ## 8. 用法
 
