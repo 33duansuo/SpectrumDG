@@ -47,9 +47,7 @@ SpectrumDG/
 │
 ├── scripts/                # 工具脚本
 │   ├── eval_multi_prior_gate.py   # 多物理先验门控评估 (建筑+高程)
-│   ├── multi_prior_gate.py        # 门控诊断工具 (特征 AUROC + 规则对比)
-│   ├── gate_diag.py               # 瓶颈特征马氏距离诊断
-│   └── input_gate_diag.py         # 输入空间建筑覆盖率诊断
+│   └── multi_prior_gate.py        # 门控诊断工具 (特征 AUROC + 规则对比)
 │
 ├── run/                    # 实验产物 (模型权重 + 训练日志 + DG 报告)
 │   ├── baseline_3urban/

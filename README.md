@@ -114,9 +114,7 @@ SpectrumDG/
 │
 ├── scripts/                # 工具脚本
 │   ├── eval_multi_prior_gate.py  # 多物理先验门控评估
-│   ├── multi_prior_gate.py       # 门控诊断工具
-│   ├── gate_diag.py              # 瓶颈特征诊断
-│   └── input_gate_diag.py        # 输入空间诊断
+│   └── multi_prior_gate.py       # 门控诊断工具
 │
 ├── run/                    # 实验产物（模型权重 + 日志）
 └── docs/                   # 详细文档
