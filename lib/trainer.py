@@ -7,7 +7,6 @@ DG 模块可任意组合, 由 cfg 开关控制 (损失组件见 lib/dg.py):
   CIRL 因果分解 (瓶颈层): ERM + λ_dom·CE_spe + λ_inv·CE_inv(GRL) + λ_orth·orth
   Fish 梯度对齐 (损失层): ERM + λ_fish·Σ_d ||∇_θ L_d - ∇_θ L̄||² (仅对 ERM loss 逐域梯度,
     不干扰 CIRL 辅助损失的梯度动态)
-  SWAD 权重平均 (训练策略层): 前 swad_start_ratio 正常训练, 之后每个 epoch 末等权平均
 """
 import os
 import time
@@ -17,12 +16,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
 
-from .dg import SWADAverager, build_domain_label_tensor, cirl_aux_loss, fish_penalty
+from .dg import build_domain_label_tensor, cirl_aux_loss, fish_penalty
 from .evaluate import evaluate
 
 
 class Trainer:
-    """两阶段训练器 (firstU → secondU), 训练循环 + 早停 + SWAD。
+    """两阶段训练器 (firstU → secondU), 训练循环 + 早停。
 
     Args:
         model: RadioWNet
@@ -42,7 +41,7 @@ class Trainer:
         self.domain_map = domain_map
 
     def train_stage(self, stage, resume_from=None, checkpoint_interval=10):
-        """训练单个阶段并返回 model (SWAD 平均权重或 best_val 权重)。
+        """训练单个阶段并返回 best_val 权重。
 
         Args:
             stage: "firstU" 或 "secondU"
@@ -54,7 +53,7 @@ class Trainer:
         model = self.model
         out_idx = self.STAGES.index(stage)
         val_key = f"NMSE_{stage}"
-        # dg_second=False: Stage2 纯 ERM (不挂 causal_2nd/Fish/SWAD), secondU 专做域内精修
+        # dg_second=False: Stage2 纯 ERM (不挂 causal_2nd/Fish), secondU 专做域内精修
         apply_dg = (stage == "firstU") or cfg.dg_second
         log_path = os.path.join(
             cfg.save_dir,
@@ -67,8 +66,6 @@ class Trainer:
         params = [p for p in model.parameters() if p.requires_grad]
         dmap = build_domain_label_tensor(self.domain_map, self.device) if cfg.use_causal else None
         decomposer = model.causal if stage == "firstU" else model.causal_2nd
-        swad_start_epoch = int(cfg.num_epochs * cfg.swad_start_ratio)
-        swad = SWADAverager() if (cfg.use_swad and apply_dg) else None
 
         start_epoch = 0
         best_val = float('inf')
@@ -82,13 +79,10 @@ class Trainer:
             best_val = ckpt['best_val']
             best_state = ckpt['best_state']
             no_improve = ckpt['no_improve']
-            if ckpt.get('swad_avg') and swad is not None:
-                swad.avg = ckpt['swad_avg']
-                swad.n = ckpt['swad_n']
             print(f"[Resume] {stage} 从 epoch {start_epoch} 恢复 "
                   f"(best_val={best_val:.6f}, no_improve={no_improve})")
         else:
-            tag = self._method_tag(stage, swad_start_epoch)
+            tag = self._method_tag(stage)
             self._init_log(log_path, stage, tag)
 
         ckpt_path = os.path.join(cfg.save_dir, f"checkpoint_{stage}.pt")
@@ -113,26 +107,21 @@ class Trainer:
             else:
                 no_improve += 1
 
-            if swad is not None and epoch >= swad_start_epoch:
-                swad.update(model)
-
-            self._print_epoch(epoch, stage, self._method_tag(stage, swad_start_epoch),
-                              stats, val_key, val_avg, swad, time.time() - since)
+            self._print_epoch(epoch, stage, self._method_tag(stage),
+                              stats, val_key, val_avg, time.time() - since)
 
             # ---- 定期保存 checkpoint ----
             if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0:
                 self.save_checkpoint(
                     ckpt_path, epoch, model, opt, sched,
-                    best_val, best_state, no_improve, swad)
+                    best_val, best_state, no_improve)
                 print(f"[Checkpoint] saved at epoch {epoch} → {ckpt_path}")
 
             if no_improve >= cfg.patience:
                 print(f"Early stopping at epoch {epoch} (no improvement for {cfg.patience} epochs)")
                 break
 
-        if swad is not None and swad.load_into(model):
-            print(f"[SWAD] {stage} 使用 {swad.n} 个 epoch 的权重平均 (从 epoch {swad_start_epoch} 起)")
-        elif best_state is not None:
+        if best_state is not None:
             model.load_state_dict(best_state)
         return model
 
@@ -141,7 +130,7 @@ class Trainer:
     # ------------------------------------------------------------------ #
 
     def save_checkpoint(self, path, epoch, model, opt, sched,
-                        best_val, best_state, no_improve, swad=None):
+                        best_val, best_state, no_improve):
         """保存训练 checkpoint (模型权重 + 优化器 + 调度器 + 训练状态)。"""
         ckpt = {
             'epoch': epoch,
@@ -152,9 +141,6 @@ class Trainer:
             'best_state': best_state,
             'no_improve': no_improve,
         }
-        if swad is not None:
-            ckpt['swad_avg'] = swad.avg
-            ckpt['swad_n'] = swad.n
         torch.save(ckpt, path)
 
     @staticmethod
@@ -210,8 +196,8 @@ class Trainer:
             stats["n"] += inputs.size(0)
         return stats
 
-    def _method_tag(self, stage, swad_start_epoch):
-        """拼接当前启用的 DG 方法标签, 如 "CIRL(...)+Fish(0.1)+SWAD(start=25)"。
+    def _method_tag(self, stage):
+        """拼接当前启用的 DG 方法标签, 如 "CIRL(...)+Fish(0.1)"。
 
         dg_second=False 的 Stage2 标注 "ERM(no-DG)" 以区分纯 ERM 域内精修。
         """
@@ -224,8 +210,6 @@ class Trainer:
                            f"λorth={cfg.causal_lambda_orth})")
         if cfg.use_fish:
             methods.append(f"Fish(λ={cfg.fish_lambda})")
-        if cfg.use_swad:
-            methods.append(f"SWAD(start={swad_start_epoch})")
         return "+".join(methods) if methods else "ERM"
 
     def _init_log(self, log_path, stage, tag):
@@ -235,11 +219,10 @@ class Trainer:
                     f"method={tag} z={cfg.z_layer} freqs={cfg.freqs or 'all'}\n")
             f.write("epoch\ttrain_avg\tval_avg\n")
 
-    def _print_epoch(self, epoch, stage, tag, stats, val_key, val_avg, swad, dt):
+    def _print_epoch(self, epoch, stage, tag, stats, val_key, val_avg, dt):
         cfg = self.cfg
         n = max(stats["n"], 1)
-        swad_tag = f" (swad_avg={swad.n})" if (swad is not None and swad.n > 0) else ""
         print(f"Epoch {epoch:3d}/{cfg.num_epochs} [{stage} {tag}] erm={stats['erm'] / n:.6f} "
               f"dom={stats['dom'] / n:.4f} inv={stats['inv'] / n:.4f} "
               f"orth={stats['orth'] / n:.4f} val_{val_key.lower()}={val_avg:.6f}"
-              f"{swad_tag} ({dt:.0f}s)")
+              f" ({dt:.0f}s)")

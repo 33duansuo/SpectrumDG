@@ -143,22 +143,6 @@ class RadioWNet(nn.Module):
 
         return [output1, output2]
 
-    def gate_features(self):
-        """firstU 瓶颈 z_spe 的 GAP 特征 (B, C), 供源域/未见域门控 (马氏距离评分)。
-
-        需在 eval 模式 forward 之后调用 (CausalDecomposer 推理时缓存)。
-        无 causal 时返回 None (无门控信号)。
-        """
-        if self.causal is None or self.causal._last_spe_feat is None:
-            return None
-        return self.causal._last_spe_feat
-
-    def gate_inv_features(self):
-        """firstU 瓶颈 z_inv 的 GAP 特征 (B, C), 门控备选信号 (诊断用)。"""
-        if self.causal is None or self.causal._last_inv_feat is None:
-            return None
-        return self.causal._last_inv_feat
-
     def _forward_firstU(self, x, x0, detach=False):
         layer00 = self.layer00(x0)
         layer0 = self.layer0(layer00)

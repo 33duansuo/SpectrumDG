@@ -33,12 +33,8 @@ class TrainConfig:
     # ---- DG 模块: Fish 梯度对齐 (损失函数层, 参考 Fishr) ----
     use_fish: bool = False
     fish_lambda: float = 0.1
-    # ---- DG 模块: SWAD 权重平均 (训练策略层, 参考 SWAD) ----
-    use_swad: bool = False
-    swad_start_ratio: float = 0.25   # 开始权重平均的 epoch 占比
     # ---- 两阶段 DG 分工 ----
-    dg_second: bool = True           # False = Stage2 (secondU) 纯 ERM, 不挂 causal_2nd/Fish/SWAD
-    gate_quantile: float = 0.05      # 已废弃: 门控改为 MahalanobisGate + LODO 自动校准 (保留字段兼容旧 config.json)
+    dg_second: bool = True           # False = Stage2 (secondU) 纯 ERM, 不挂 causal_2nd/Fish
     # ---- 输出 ----
     save_dir: str = "run/baseline"
     report: str = ""                 # DG 报告 JSON 路径; 空 = save_dir/dg_report.json
@@ -50,7 +46,6 @@ EXPERIMENTS = {
     "causal": {"use_causal": True},
     "fish": {"use_fish": True},
     "fish_causal": {"use_causal": True, "use_fish": True},
-    "fish_causal_swad": {"use_causal": True, "use_fish": True, "use_swad": True},
-    # DG-firstU + 纯ERM-secondU + classifier_spe 置信度门控
-    "dg_gate": {"use_causal": True, "use_fish": True, "use_swad": True, "dg_second": False},
+    # DG-firstU + 纯ERM-secondU + 物理先验门控
+    "dg_gate": {"use_causal": True, "use_fish": True, "dg_second": False},
 }

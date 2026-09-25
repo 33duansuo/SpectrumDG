@@ -1,9 +1,8 @@
 """域泛化 (DG) 组件: 损失函数与训练策略。
 
-包含三层 DG 干预手段 (可与 ERM 任意组合):
+包含两层 DG 干预手段 (可与 ERM 任意组合):
   CIRL 因果分解 (瓶颈层, model/causal.py): 域分类 + GRL 对抗 + 正交解相关
   Fish 梯度对齐 (损失函数层): ERM + λ_fish·Σ_d ||∇_θ L_d - ∇_θ L̄||²
-  SWAD 权重平均 (训练策略层): 训练后期对权重做等权平均, 寻找平坦极小值
 """
 import torch
 
@@ -48,30 +47,3 @@ def fish_penalty(out, targets, domain_ids, params, crit):
     grad_stack = torch.stack(per_domain_grads)  # (D, P)
     grad_mean = grad_stack.mean(0, keepdim=True)
     return ((grad_stack - grad_mean) ** 2).sum()
-
-
-class SWADAverager:
-    """SWAD 权重平均: 自 start_epoch 起累积每个 epoch 末的权重, 最后等权平均。"""
-
-    def __init__(self):
-        self.avg = {}
-        self.n = 0
-
-    def update(self, model):
-        with torch.no_grad():
-            for k, v in model.state_dict().items():
-                if k in self.avg and self.avg[k].dtype.is_floating_point:
-                    self.avg[k] += v
-                else:
-                    self.avg[k] = v.clone()
-        self.n += 1
-
-    def load_into(self, model):
-        """用权重平均替换模型权重; 未累积过则返回 False。"""
-        if self.n == 0:
-            return False
-        for k in self.avg:
-            if self.avg[k].dtype.is_floating_point:
-                self.avg[k] /= self.n
-        model.load_state_dict(self.avg, strict=False)
-        return True

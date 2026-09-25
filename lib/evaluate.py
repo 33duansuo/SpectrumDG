@@ -1,16 +1,13 @@
 """评估: in-domain / cross-domain 的 MSE + NMSE (firstU / secondU / gated)。
 
-gated 门控推理: firstU 瓶颈 z_spe 的 GAP 特征上拟合每域高斯 (MahalanobisGate),
-马氏距离小 (靠近某源域簇) → 判为源域 → 输出 secondU 精修, 否则输出 firstU。
-门控拟合与 LODO 阈值校准仅用源域 val 划分 (不接触目标域数据)。
+gated 门控推理: 输入通道 0 (buildings) 建筑覆盖率 >= threshold → 源域 → secondU,
+否则 → 未见域 → firstU。阈值固定 0.01 (1%), 源域中位数 ~5%, OOD ~0-0.1%。
 """
 import statistics
 from collections import defaultdict
 
 import torch
 import torch.nn as nn
-
-from .gate import MahalanobisGate
 
 
 def evaluate(model, loader, device, gate=None, gate_threshold=None):
@@ -20,7 +17,6 @@ def evaluate(model, loader, device, gate=None, gate_threshold=None):
     firstU=output1, secondU=output2。NMSE = MSE(pred,tgt)/MSE(tgt,0)。
     gate='simple': 输入通道 0 (buildings) 覆盖率 >= threshold → 源域 → secondU;
                    否则 → 未见域 → firstU。threshold 默认 0.01 (1% 覆盖)。
-    gate='mahalanobis': 使用 MahalanobisGate 对象 (需已 fit+calibrate)。
     """
     model.eval()
     metrics = defaultdict(float)
@@ -48,49 +44,11 @@ def evaluate(model, loader, device, gate=None, gate_threshold=None):
                 metrics['MSE_gated'] += mse.item() * targets.size(0)
                 metrics['NMSE_gated'] += (mse / tgt_mse).item() * targets.size(0)
                 n_second += int(use_second.sum().item())
-            elif gate is not None and hasattr(gate, 'use_second'):
-                # MahalanobisGate 对象
-                feats = model.gate_features()
-                if feats is not None:
-                    use_second = gate.use_second(feats).to(o1.device).view(-1, 1, 1, 1)
-                    pred = torch.where(use_second, o2, o1)
-                    mse = crit(pred, targets)
-                    metrics['MSE_gated'] += mse.item() * targets.size(0)
-                    metrics['NMSE_gated'] += (mse / tgt_mse).item() * targets.size(0)
-                    n_second += int(use_second.sum().item())
             n += targets.size(0)
     out = {k: v / n for k, v in metrics.items()}
     if 'NMSE_gated' in out:
         out['gate_second_frac'] = n_second / n
     return out
-
-
-def collect_gate_features(model, loader, device, feat_fn=None):
-    """收集 loader 上 per-sample 的门控特征与域 id (eval, no_grad)。
-
-    Args:
-        feat_fn: 特征提取函数, 默认 model.gate_features (z_spe);
-            可传 model.gate_inv_features (z_inv) 等备选信号 (诊断用)
-
-    Returns:
-        (feats (N,D), dom_ids (N,)) 或 None (模型无 causal 门控信号)
-    """
-    if feat_fn is None:
-        feat_fn = model.gate_features
-    model.eval()
-    feats_all, dom_all = [], []
-    with torch.no_grad():
-        for inputs, _, dom_ids in loader:
-            inputs = inputs.to(device)
-            model(inputs)
-            feats = feat_fn()
-            if feats is None:
-                return None
-            feats_all.append(feats.cpu())
-            dom_all.append(dom_ids)
-    if not feats_all:
-        return None
-    return torch.cat(feats_all), torch.cat(dom_all)
 
 
 def _print_metrics(tag, res, n):
@@ -109,8 +67,8 @@ def evaluate_report(model, val_dl, test_dls, test_terrs, device,
         test_dls: {terrain: DataLoader}, 每个跨域测试场景一份
         test_terrs: 测试场景名列表 (test_dls 的键序)
         device: torch.device
-        gate: 'simple' (建筑覆盖率阈值) 或 'mahalanobis' (MahalanobisGate 对象)
-        gate_threshold: 门控阈值; simple 模式下默认从 val 校准 (min 源域覆盖 * 0.5)
+        gate: 'simple' (建筑覆盖率阈值门控)
+        gate_threshold: 门控阈值; 默认 0.01 (1%)
 
     Returns:
         report dict: {"indomain": {...}, "cross_<terrain>": {...}, "cross_avg": {...},

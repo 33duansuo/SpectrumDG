@@ -13,7 +13,7 @@
   CUDA_VISIBLE_DEVICES=5 python train.py --exp causal --save_dir run/causal_3urban
   # Fish 梯度对齐 (损失函数层)
   CUDA_VISIBLE_DEVICES=5 python train.py --exp fish --save_dir run/fish_3urban
-  # Fish+CIRL / Fish+CIRL+SWAD: --exp fish_causal / --exp fish_causal_swad
+  # Fish+CIRL: --exp fish_causal
 """
 import argparse
 import json
@@ -36,7 +36,7 @@ def parse_args():
     # 实验预设 (与命令行 DG 开关等价, 二选一; 开关优先)
     p.add_argument("--exp", type=str, default="baseline",
                    choices=sorted(EXPERIMENTS.keys()),
-                   help="实验预设: baseline/causal/fish/fish_causal/fish_causal_swad")
+                   help="实验预设: baseline/causal/fish/fish_causal")
     p.add_argument("--gpu", type=int, default=None, help="可见 GPU 内的编号 (建议用 CUDA_VISIBLE_DEVICES 代替)")
     # 数据
     p.add_argument("--train_terrains", type=str, default=None, help="训练场景, 逗号分隔")
@@ -68,15 +68,10 @@ def parse_args():
                    help="z_inv 对抗域分类 CE 权重 (经 GRL, DANN 风格, 典型 0.01~1.0)")
     p.add_argument("--causal_lambda_orth", type=float, default=None, help="z_inv/z_spe 正交解相关权重")
     p.add_argument("--causal_lambda_grl", type=float, default=None, help="GRL 梯度反转系数")
-    # SWAD 权重平均 (训练策略层, 参考 SWAD, Cha et al. 2021)
-    p.add_argument("--use_swad", action="store_true", default=None,
-                   help="启用 SWAD: 训练后期对权重做等权平均, 寻找平坦极小值")
-    p.add_argument("--swad_start_ratio", type=float, default=None,
-                   help="开始权重平均的 epoch 占比 (默认 0.25)")
     # 两阶段 DG 分工 + 初始化复用
     p.add_argument("--dg_second", "--no_dg_second", dest="dg_second", action="store_false",
                    default=None,
-                   help="Stage2 (secondU) 纯 ERM 域内精修, 不挂 Causal/Fish/SWAD (dg_gate 实验)")
+                   help="Stage2 (secondU) 纯 ERM 域内精修, 不挂 Causal/Fish (dg_gate 实验)")
     p.add_argument("--init_firstU", type=str, default=None,
                    help="加载已有 firstU 权重 (如 run/xxx/Trained_Model_FirstU.pt) 并跳过 Stage1; "
                         "Stage1/Stage2 梯度完全隔离, 数学上等价于重跑")
@@ -121,7 +116,7 @@ def main():
         torch.cuda.set_device(args.gpu)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device} | exp={args.exp} train={cfg.train_terrains} test={cfg.test_terrains} "
-          f"fish={cfg.use_fish} causal={cfg.use_causal} swad={cfg.use_swad}")
+          f"fish={cfg.use_fish} causal={cfg.use_causal}")
 
     # 配置快照: test.py 依据它复现评估
     with open(os.path.join(cfg.save_dir, "config.json"), "w") as f:
