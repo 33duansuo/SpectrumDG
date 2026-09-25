@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# PyTorch / Model weights
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# Experiment runs (large files)
+run/
+
+# Data
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+nohup.out
+
+# Environment
+.env
+.venv/
+env/
+
+# Cache
+.pytest_cache/
+.mypy_cache/
