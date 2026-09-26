@@ -46,15 +46,24 @@ skip 连接升级为 **CBAM 注意力精炼**，瓶颈层可插入 **CIRL 因果
 
 最终输出: conv_up0(80→20) → cat(layer00, x0) → conv_up00(40+2→20) → cat(x0) → conv_up000(20+2→1) → **output1** (1 通道)
 
-### 2.2 secondU（W-编码器 Wlayer0→Wlayer5 + W-解码器 Wconv_up5→Wconv_up000）
+### 2.2 secondU（W-编码器 + 特征桥接 + W-解码器）
 
-**输入**: cat(output1.detach(), x) = 3 通道（firstU 预测 + buildings + Tx 邻近图）
+**输入**: cat(output1.detach(), x, feat_bridged) = 53 通道
+- output1 (1ch): firstU 预测输出
+- x (2ch): 原始输入 (buildings + Tx 邻近图)
+- feat_bridged (50ch): firstU 编码器 layer5 特征 (CIRL 前) 经 1×1 卷积压缩 + 上采样
+
+**特征桥接 (feat_bridge)**:
+```
+firstU layer5 (500ch, 4×4) → Conv2d(500→50, 1×1) → BN → ReLU → Upsample(128×128)
+```
+解决 secondU 无法访问域特定信息的问题：CIRL 将 z_spe 丢弃，但 feat_bridge 保留了 CIRL 前的完整编码特征。
 
 **W-编码器**:
 
 | 层 | 输入通道 | 输出通道 |
 |---|---|---|
-| Wlayer00 | 3 | 20 |
+| Wlayer00 | 53 (1+2+50) | 20 |
 | Wlayer0 | 20 | 30 |
 | Wlayer1 | 30 | 40 |
 | Wlayer10 | 40 | 50 |
@@ -64,9 +73,9 @@ skip 连接升级为 **CBAM 注意力精炼**，瓶颈层可插入 **CIRL 因果
 | Wlayer4 | 90 | 110 |
 | Wlayer5 | 110 | **150** |
 
-**瓶颈层**: Wlayer5 输出 150 通道，可选插入 `CausalDecomposer(channels=150)`。
+**瓶颈层**: Wlayer5 输出 150 通道，可选插入 `CausalDecomposer(channels=150)`。当前 dg_gate 实验中 secondU 纯 ERM，不插入 CIRL。
 
-**W-解码器** + **CBAM skip 连接**（7 个 W-CBAM 模块）: 结构对称，模式同 firstU。
+**W-解码器** + **CBAM skip 连接**（7 个 W-CBAM 模块）: 结构对称，模式同 firstU。最终 skip 拼接 winput(53ch) 而非原始输入。
 
 最终输出: **output2** (1 通道)
 

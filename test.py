@@ -2,7 +2,7 @@
 
 默认读取 {run_dir}/config.json (train.py 训练时写入) 重建数据与模型,
 加载 {run_dir}/Trained_Model_SecondU.pt (含两阶段全部权重), 输出
-in-domain + cross-domain 的 MSE/NMSE 报告。
+in-domain + cross-domain 的 MAE/MSE/PSNR 报告。
 
 用法:
   cd /data/userSZ/duanrj/SpectrumDG
@@ -22,7 +22,8 @@ import torch
 import numpy as np
 
 from configs import EXPERIMENTS, TrainConfig
-from data_process.dataset import build_dataloaders
+from data_process.dataset import SpectrumNetDataset, TERRAIN_ORDER
+from torch.utils.data import DataLoader
 from lib.evaluate import evaluate_report
 from model.radiownet import RadioWNet
 
@@ -79,18 +80,20 @@ def main():
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    # ---- 数据: val (in-domain) + 每个测试场景独立 loader ----
+    # ---- 数据: val (in-domain) + 每个测试场景独立 loader (返回 terrain 以支持多物理先验门控) ----
     freqs = [s.strip() for s in cfg.freqs.split(",") if s.strip()] or None
     train_terrs = [s.strip() for s in cfg.train_terrains.split(",") if s.strip()]
     test_terrs = [s.strip() for s in cfg.test_terrains.split(",") if s.strip()]
-    common = dict(z_layer=cfg.z_layer, freqs=freqs, batch_size=cfg.batch_size,
-                  num_workers=cfg.num_workers, max_per_terrain=cfg.max_per_terrain,
-                  root=cfg.data_root, seed=cfg.seed)
-    _, val_dl, *_ = build_dataloaders(train_terrs, test_terrs[0], **common)
+    common = dict(z_layer=cfg.z_layer, freqs=freqs, max_per_terrain=cfg.max_per_terrain,
+                  root=cfg.data_root, seed=cfg.seed, return_terrain=True)
+    val_ds = SpectrumNetDataset(train_terrs, split="val", split_ratio=0.85, **common)
+    val_dl = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
+                        num_workers=cfg.num_workers)
     test_dls = {}
     for tt in test_terrs:
-        _, _, tdl, *_ = build_dataloaders(train_terrs, tt, **common)
-        test_dls[tt] = tdl
+        test_ds = SpectrumNetDataset([tt], split="test", split_ratio=1.0, **common)
+        test_dls[tt] = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False,
+                                  num_workers=cfg.num_workers)
     print(f"val={len(val_dl.dataset)} "
           f"test={{{', '.join(f'{t}={len(test_dls[t].dataset)}' for t in test_terrs)}}}")
 
@@ -113,15 +116,21 @@ def main():
     with open(rep_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\nDG 报告保存至 {rep_path}")
-    print(f"\n[结果] in_domain NMSE_firstU = {report['indomain']['NMSE_firstU']:.6f} "
-          f"NMSE_secondU = {report['indomain']['NMSE_secondU']:.6f}")
-    print(f"[结果] cross_avg NMSE_firstU = {report['cross_avg']['NMSE_firstU']:.6f} "
-          f"NMSE_secondU = {report['cross_avg']['NMSE_secondU']:.6f}")
-    if 'NMSE_gated' in report['cross_avg']:
+    print(f"\n[结果] in_domain MAE_firstU = {report['indomain']['MAE_firstU']:.6f} "
+          f"MSE_firstU = {report['indomain']['MSE_firstU']:.6f} PSNR_firstU = {report['indomain']['PSNR_firstU']:.4f}dB")
+    print(f"[结果] in_domain MAE_secondU = {report['indomain']['MAE_secondU']:.6f} "
+          f"MSE_secondU = {report['indomain']['MSE_secondU']:.6f} PSNR_secondU = {report['indomain']['PSNR_secondU']:.4f}dB")
+    print(f"[结果] cross_avg MAE_firstU = {report['cross_avg']['MAE_firstU']:.6f} "
+          f"MSE_firstU = {report['cross_avg']['MSE_firstU']:.6f} PSNR_firstU = {report['cross_avg']['PSNR_firstU']:.4f}dB")
+    print(f"[结果] cross_avg MAE_secondU = {report['cross_avg']['MAE_secondU']:.6f} "
+          f"MSE_secondU = {report['cross_avg']['MSE_secondU']:.6f} PSNR_secondU = {report['cross_avg']['PSNR_secondU']:.4f}dB")
+    if 'MAE_gated' in report['cross_avg']:
         cross_fracs = [report['cross_' + t].get('gate_second_frac', 0) for t in test_terrs]
         frac_str = '/'.join(f'{v:.3f}' for v in cross_fracs)
-        print(f"[结果] in_domain NMSE_gated = {report['indomain']['NMSE_gated']:.6f} "
-              f"cross_avg NMSE_gated = {report['cross_avg']['NMSE_gated']:.6f} "
+        print(f"[结果] in_domain MAE_gated = {report['indomain']['MAE_gated']:.6f} "
+              f"MSE_gated = {report['indomain']['MSE_gated']:.6f} PSNR_gated = {report['indomain']['PSNR_gated']:.4f}dB")
+        print(f"[结果] cross_avg MAE_gated = {report['cross_avg']['MAE_gated']:.6f} "
+              f"MSE_gated = {report['cross_avg']['MSE_gated']:.6f} PSNR_gated = {report['cross_avg']['PSNR_gated']:.4f}dB "
               f"(gate_second_frac: {report['indomain'].get('gate_second_frac', 0):.3f} "
               f"in-domain / {frac_str} cross)")
 

@@ -1,7 +1,7 @@
 """统一两阶段训练器。
 
-Stage 1 (firstU):  监督 output1, 验证选优 NMSE_firstU
-Stage 2 (secondU): 监督 output2 (firstU 路径由模型内 detach 冻结), 验证选优 NMSE_secondU
+Stage 1 (firstU):  监督 output1, 验证选优 MSE_firstU
+Stage 2 (secondU): 监督 output2 (firstU 路径由模型内 detach 冻结), 验证选优 MSE_secondU
 
 DG 模块可任意组合, 由 cfg 开关控制 (损失组件见 lib/dg.py):
   CIRL 因果分解 (瓶颈层): ERM + λ_dom·CE_spe + λ_inv·CE_inv(GRL) + λ_orth·orth
@@ -52,7 +52,7 @@ class Trainer:
         cfg = self.cfg
         model = self.model
         out_idx = self.STAGES.index(stage)
-        val_key = f"NMSE_{stage}"
+        val_key = f"MSE_{stage}"
         # dg_second=False: Stage2 纯 ERM (不挂 causal_2nd/Fish), secondU 专做域内精修
         apply_dg = (stage == "firstU") or cfg.dg_second
         log_path = os.path.join(

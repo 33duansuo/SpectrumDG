@@ -45,13 +45,13 @@ penalty = Σ_d ||∇_θ L_d - ∇_θ L̄||²
 
 **结果**：单独使用 Fish 跨域改善 19.6%（3urban→Grassland），与 CIRL 组合后达 21.3%。
 
-### 2.4 训练策略层：SWAD 权重平均（保留为可选）
+### 2.4 训练策略层：SWAD 权重平均（已移除）
 
 **思路**：Seek Weights with Flat loss lAndscape for Domain generalization（Cha et al. 2021），在训练后期对权重做等权平均，寻找平坦极小值。
 
 **结果**：Fish+CIRL+SWAD 跨域 NMSE 0.3398，未优于 Fish+CIRL（0.3387）。双重正则化已将模型推向平坦区域，SWAD 边际收益递减。
 
-**决策**：保留为可选模块（`--use_swad`），默认不启用。
+**决策**：已移除。实验证明 CIRL+Fish 双重正则化已足够，SWAD 无额外增益。
 
 ## 3. 骨干网络改进：CBAM 注意力 U-Net
 
@@ -86,13 +86,13 @@ Stage 2 (secondU): model.phase = "secondU"
 
 通过 `configs.py` 的 `EXPERIMENTS` 字典定义预设，命令行 `--exp` 选择，命令行开关可覆盖预设：
 
-| 预设 | CIRL | Fish | SWAD | 说明 |
-|---|---|---|---|---|
-| baseline | - | - | - | ERM 基线 |
-| causal | ✓ | - | - | 瓶颈层因果分解 |
-| fish | - | ✓ | - | 梯度对齐 |
-| fish_causal | ✓ | ✓ | - | 最优组合（推荐） |
-| fish_causal_swad | ✓ | ✓ | ✓ | 含权重平均 |
+| 预设 | CIRL | Fish | 说明 |
+|---|---|---|---|
+| baseline | - | - | ERM 基线 |
+| causal | ✓ | - | 瓶颈层因果分解 |
+| fish | - | ✓ | 梯度对齐 |
+| fish_causal | ✓ | ✓ | DG 最优组合 |
+| dg_gate | ✓ | ✓ | DG + 门控 (Stage2 纯 ERM) |
 
 用法示例：
 ```bash
@@ -108,8 +108,16 @@ python train.py --exp baseline --use_causal --causal_lambda_inv 0.05 --save_dir 
 **骨干**：CBAM U-Net（双级联 U-Net，14 个 CBAM 模块 + 2 个 CausalDecomposer）
 
 **域泛化模块**：
-- 瓶颈层：CIRL 因果分解（firstU layer5 + secondU Wlayer5）
+- 瓶颈层：CIRL 因果分解（仅 firstU layer5，secondU 纯 ERM）
 - 损失函数：Fish 梯度对齐（仅对 ERM loss 计算逐域梯度惩罚）
+
+**特征桥接**：
+- firstU 编码器 layer5 (CIRL 前) → 1×1 卷积压缩 (500→50ch) + 上采样 → 传入 secondU
+- 解决 secondU 无法访问域特定信息的问题
+
+**门控推理**：
+- 多物理先验 v4 规则：建筑覆盖率 + 地形高程组合
+- 推理时自动判断域内/跨域，选择 secondU/firstU 输出
 
 **训练策略**：
 - 两阶段训练：Stage 1 监督 firstU（output1），Stage 2 监督 secondU（output2）

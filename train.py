@@ -182,15 +182,21 @@ def main():
     with open(rep_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\nDG 报告保存至 {rep_path}")
-    print(f"\n[结果] in_domain NMSE_firstU = {report['indomain']['NMSE_firstU']:.6f} "
-          f"NMSE_secondU = {report['indomain']['NMSE_secondU']:.6f}")
-    print(f"[结果] cross_avg NMSE_firstU = {report['cross_avg']['NMSE_firstU']:.6f} "
-          f"NMSE_secondU = {report['cross_avg']['NMSE_secondU']:.6f}")
-    if 'NMSE_gated' in report['cross_avg']:
+    print(f"\n[结果] in_domain MAE_firstU = {report['indomain']['MAE_firstU']:.6f} "
+          f"MSE_firstU = {report['indomain']['MSE_firstU']:.6f} PSNR_firstU = {report['indomain']['PSNR_firstU']:.4f}dB")
+    print(f"[结果] in_domain MAE_secondU = {report['indomain']['MAE_secondU']:.6f} "
+          f"MSE_secondU = {report['indomain']['MSE_secondU']:.6f} PSNR_secondU = {report['indomain']['PSNR_secondU']:.4f}dB")
+    print(f"[结果] cross_avg MAE_firstU = {report['cross_avg']['MAE_firstU']:.6f} "
+          f"MSE_firstU = {report['cross_avg']['MSE_firstU']:.6f} PSNR_firstU = {report['cross_avg']['PSNR_firstU']:.4f}dB")
+    print(f"[结果] cross_avg MAE_secondU = {report['cross_avg']['MAE_secondU']:.6f} "
+          f"MSE_secondU = {report['cross_avg']['MSE_secondU']:.6f} PSNR_secondU = {report['cross_avg']['PSNR_secondU']:.4f}dB")
+    if 'MAE_gated' in report['cross_avg']:
         cross_fracs = [report['cross_' + t].get('gate_second_frac', 0) for t in test_terrs]
         frac_str = '/'.join(f'{v:.3f}' for v in cross_fracs)
-        print(f"[结果] in_domain NMSE_gated = {report['indomain']['NMSE_gated']:.6f} "
-              f"cross_avg NMSE_gated = {report['cross_avg']['NMSE_gated']:.6f} "
+        print(f"[结果] in_domain MAE_gated = {report['indomain']['MAE_gated']:.6f} "
+              f"MSE_gated = {report['indomain']['MSE_gated']:.6f} PSNR_gated = {report['indomain']['PSNR_gated']:.4f}dB")
+        print(f"[结果] cross_avg MAE_gated = {report['cross_avg']['MAE_gated']:.6f} "
+              f"MSE_gated = {report['cross_avg']['MSE_gated']:.6f} PSNR_gated = {report['cross_avg']['PSNR_gated']:.4f}dB "
               f"(gate_second_frac: {report['indomain'].get('gate_second_frac', 0):.3f} "
               f"in-domain / {frac_str} cross)")
 

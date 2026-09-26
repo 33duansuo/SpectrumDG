@@ -9,18 +9,22 @@ SpectrumDG 是一个**频谱地图预测跨域泛化**研究项目，基于 Spec
 ## 2. 技术架构
 
 ```
-输入 (2ch)          firstU (粗预测)         secondU (精修)          输出
+输入 (2ch)          firstU (泛化)           secondU (精修)          门控输出
 ┌──────────┐    ┌──────────────────┐    ┌──────────────────┐    ┌──────┐
-│ buildings│    │ Encoder (layer0-5)│    │ W-Encoder        │    │out1  │
-│          │───→│   + CBAM skips   │───→│   + W-CBAM skips │───→│out2  │
-│ Tx_prox  │    │   + CIRL(500ch)  │    │   + CIRL(150ch)  │    │      │
+│ buildings│    │ Encoder (layer0-5)│    │ W-Encoder        │    │      │
+│          │───→│   + CBAM skips   │───→│   + W-CBAM skips │───→│ Gate │──→ output
+│ Tx_prox  │    │   + CIRL(500ch)  │    │   (150ch瓶颈)    │    │      │
 └──────────┘    └──────────────────┘    └──────────────────┘    └──────┘
-                     ↓ detach               ↑ concat(out1, x)
+                     ↓ detach               ↑ concat(out1, x, bridge)  ↑
+                     ↓                                                   物理先验
+              feat_bridge(50ch)                                         (建筑+高程)
 ```
 
-- **骨干**: RadioWNet — 双 U-Net 级联（14 个 CBAM 模块 + 2 个 CausalDecomposer）
+- **骨干**: RadioWNet — 双 U-Net 级联（14 个 CBAM 模块 + 特征桥接）
 - **两阶段训练**: Stage 1 训练 firstU → Stage 2 训练 secondU，通过 `.detach()` 梯度隔离
-- **域泛化**: CIRL 因果分解（瓶颈层）+ Fish 梯度对齐（损失函数层），可任意组合
+- **域泛化**: CIRL 因果分解（firstU 瓶颈层）+ Fish 梯度对齐（损失函数层）
+- **特征桥接**: firstU 编码器特征 (CIRL 前) 压缩后传入 secondU，解决域信息丢失问题
+- **门控推理**: 多物理先验 v4 规则（建筑+高程），推理时自动选择 firstU/secondU 输出
 
 ## 3. 代码结构
 
@@ -28,35 +32,30 @@ SpectrumDG 是一个**频谱地图预测跨域泛化**研究项目，基于 Spec
 SpectrumDG/
 ├── configs.py              # 实验配置 + 预设定义
 ├── train.py                # 训练入口: 两阶段训练 + 自动评估
-├── test.py                 # 评估入口: 从 checkpoint 复现评估
-├── run_spectrumdg.py       # 兼容入口 (已废弃, 转发至 train.py)
+├── test.py                 # 评估入口: 从 checkpoint 复现评估 (默认多物理先验门控)
 │
 ├── model/                  # 网络模型
-│   ├── radiownet.py        #   RadioWNet 双 U-Net 骨干
+│   ├── radiownet.py        #   RadioWNet 双 U-Net 骨干 + 特征桥接
 │   ├── attention.py        #   CBAM 注意力模块 (通道×空间)
-│   ├── causal.py           #   CIRL 因果分解 + GRL
-│   └── physics.py          #   物理先验 (SignalMutationAttention, PhysicsElection)
+│   └── causal.py           #   CIRL 因果分解 + GRL
 │
 ├── data_process/           # 数据处理
-│   └── dataset.py          #   SpectrumNet 数据集 + DataLoader
+│   └── dataset.py          #   SpectrumNet 数据集 + DataLoader (支持 terrain_yx)
 │
 ├── lib/                    # 训练/评估工具
-│   ├── trainer.py          #   两阶段训练器 (早停 + SWAD + DG 组合)
-│   ├── evaluate.py         #   in-domain / cross-domain MSE+NMSE 评估 + 简单阈值门控
-│   └── dg.py               #   DG 组件 (Fish 梯度惩罚, SWAD 平均, CIRL 辅助损失)
+│   ├── trainer.py          #   两阶段训练器 (早停 + DG 组合)
+│   ├── evaluate.py         #   MAE+MSE+PSNR 评估 + 多物理先验门控
+│   └── dg.py               #   DG 组件 (Fish 梯度惩罚, CIRL 辅助损失)
 │
 ├── scripts/                # 工具脚本
-│   ├── eval_multi_prior_gate.py   # 多物理先验门控评估 (建筑+高程)
 │   └── multi_prior_gate.py        # 门控诊断工具 (特征 AUROC + 规则对比)
 │
 ├── run/                    # 实验产物 (模型权重 + 训练日志 + DG 报告)
-│   ├── baseline_3urban/
-│   ├── causal_3urban/
-│   ├── fish_3urban/
-│   ├── fish_causal_3urban/
-│   ├── fish_causal_swad_3urban/
-│   ├── cbam_baseline_4to4/
-│   └── ...
+│   ├── cbam_baseline_4to4/        # CBAM 基线
+│   ├── cbam_dg_4to4/              # DG 无门控
+│   ├── cbam_dg_gate_4to4/         # 旧版门控 (含 SWAD)
+│   ├── cbam_dg_gate_nswad_4to4/   # 无 SWAD 版本
+│   └── cbam_dg_gate_bridge_4to4/  # 当前版本 (特征桥接)
 │
 └── docs/                   # 项目文档
     ├── project_overview.md          # 本文档
@@ -111,24 +110,24 @@ Tx 位置 → log-distance 邻近图 → 归一化 → Tx 邻近输入
 3. 构建模型 (RadioWNet + 可选 CIRL)
 4. Stage 1: firstU 训练 (trainer.py)
    - ERM + 可选 CIRL aux + 可选 Fish penalty
-   - 验证集 NMSE_firstU 选优 + 早停
-   - 可选 SWAD 权重平均
+   - 验证集 MSE_firstU 选优 + 早停
 5. Stage 2: secondU 训练 (firstU detach, 只训练 W-Net)
    - 同上损失结构, 监督 output2
 6. 评估 (evaluate.py)
    - in-domain (val 划分) + cross-domain (多场景)
-   - 报告 MSE/NMSE (firstU + secondU) → dg_report.json
+   - 报告 MAE/MSE/PSNR (firstU + secondU + gated) → dg_report.json
+   - 默认使用多物理先验门控 (gate='multi_prior')
 ```
 
 ## 6. 实验预设
 
-| 预设 | CIRL | Fish | SWAD | 说明 |
-|---|---|---|---|---|
-| baseline | - | - | - | ERM 基线 |
-| causal | ✓ | - | - | 瓶颈层因果分解 |
-| fish | - | ✓ | - | 梯度对齐 |
-| fish_causal | ✓ | ✓ | - | 最优组合 |
-| fish_causal_swad | ✓ | ✓ | ✓ | 含权重平均 |
+| 预设 | CIRL | Fish | 说明 |
+|---|---|---|---|
+| baseline | - | - | ERM 基线 |
+| causal | ✓ | - | 瓶颈层因果分解 |
+| fish | - | ✓ | 梯度对齐 |
+| fish_causal | ✓ | ✓ | 最优组合 (DG) |
+| dg_gate | ✓ | ✓ | DG + 门控 (Stage2 纯 ERM) |
 
 ## 7. 关键实验结果
 
@@ -161,14 +160,13 @@ Tx 位置 → log-distance 邻近图 → 归一化 → Tx 邻近输入
 ## 8. 用法
 
 ```bash
-# 基线训练
-python train.py --exp baseline --save_dir run/baseline_3urban
+# DG + 门控训练 (推荐)
+python train.py --exp dg_gate --save_dir run/cbam_dg_gate_bridge_4to4 \
+  --train_terrains 05.Suburban,06.DenseUrban,07.Rural,08.OrdinaryUrban \
+  --test_terrains 01.Grassland,09.Desert,10.Mountainous,11.Forest
 
-# 最优 DG 组合
-python train.py --exp fish_causal --save_dir run/fish_causal_3urban
-
-# 从 checkpoint 复现评估
-python test.py --run_dir run/fish_causal_3urban
+# 从 checkpoint 复现评估 (自动使用多物理先验门控)
+python test.py --run_dir run/cbam_dg_gate_bridge_4to4
 
 # 覆盖测试场景
 python test.py --run_dir run/cbam_baseline_4to4 --test_terrain 01.Grassland,09.Desert
@@ -178,5 +176,5 @@ python test.py --run_dir run/cbam_baseline_4to4 --test_terrain 01.Grassland,09.D
 
 - Python 3.10+
 - PyTorch (CUDA)
-- NumPy, PIL
+- NumPy, PIL, scipy
 - 数据集: SpectrumNet/PPData5D-success (Kaggle)

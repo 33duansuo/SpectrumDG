@@ -86,7 +86,17 @@ class RadioWNet(nn.Module):
             self.conv_up00 = convrelu(20 + 10 + inputs, 20, 5, 2, 1)
         self.conv_up000 = convrelu(20 + inputs, 1, 5, 2, 1)
 
-        self.Wlayer00 = convrelu(inputs + 1, 20, 3, 1, 1)
+        # 特征桥接: 将 firstU 编码器特征 (CIRL 前) 传递给 secondU
+        # 500ch → 50ch (1x1 卷积压缩), 解决 secondU 无法访问域特定信息的问题
+        # 上采样到输入尺寸 (128x128) 以匹配 output1 和 x
+        self.feat_bridge = nn.Sequential(
+            nn.Conv2d(500, 50, kernel_size=1),
+            nn.BatchNorm2d(50),
+            nn.ReLU(inplace=True),
+            nn.Upsample(size=(128, 128), mode='bilinear', align_corners=False),
+        )
+
+        self.Wlayer00 = convrelu(inputs + 1 + 50, 20, 3, 1, 1)  # 输入: output1(1) + x(2) + bridge(50)
         self.Wlayer0 = convrelu(20, 30, 5, 2, 2)
         self.Wlayer1 = convrelu(30, 40, 5, 2, 2)
         self.Wlayer10 = convrelu(40, 50, 5, 2, 1)
@@ -104,8 +114,9 @@ class RadioWNet(nn.Module):
         self.Wconv_up10 = convrelu(50 + 50, 40, 5, 2, 1)
         self.Wconv_up1 = convreluT(40 + 40, 30, 6, 2)
         self.Wconv_up0 = convreluT(30 + 30, 20, 6, 2)
-        self.Wconv_up00 = convrelu(20 + 20 + inputs + 1, 20, 5, 2, 1)
-        self.Wconv_up000 = convrelu(20 + inputs + 1, 1, 5, 2, 1)
+        # secondU 最终 skip: decoder(20) + wlayer00(20) + winput(1+2+50=53)
+        self.Wconv_up00 = convrelu(20 + 20 + (inputs + 1 + 50), 20, 5, 2, 1)
+        self.Wconv_up000 = convrelu(20 + (inputs + 1 + 50), 1, 5, 2, 1)
 
         # CBAM 注意力: firstU skip 连接 (7 个), 编码器特征 → CBAM → cat(decoder, refined)
         self.cbam4 = CBAM(300)
@@ -135,11 +146,11 @@ class RadioWNet(nn.Module):
         x0 = x[:, 0:self.inputs, :, :]
 
         if self.phase == "firstU":
-            output1 = self._forward_firstU(x, x0)
-            output2 = self._forward_secondU(x, output1, detach=True)
+            output1, feat_bridged = self._forward_firstU(x, x0)
+            output2 = self._forward_secondU(x, output1, feat_bridged, detach=True)
         else:
-            output1 = self._forward_firstU(x, x0, detach=True)
-            output2 = self._forward_secondU(x, output1, detach=False)
+            output1, feat_bridged = self._forward_firstU(x, x0, detach=True)
+            output2 = self._forward_secondU(x, output1, feat_bridged, detach=False)
 
         return [output1, output2]
 
@@ -153,6 +164,10 @@ class RadioWNet(nn.Module):
         layer3 = self.layer3(layer20)
         layer4 = self.layer4(layer3)
         layer5 = self.layer5(layer4)
+        
+        # 保存 CIRL 前的特征，通过桥接传递给 secondU
+        feat_bridged = self.feat_bridge(layer5)
+        
         if self.causal is not None:
             # z_inv(域不变) → 解码器; aux 暂存于 self.causal._last_aux
             layer5 = self.causal(layer5)
@@ -180,10 +195,13 @@ class RadioWNet(nn.Module):
 
         if detach:
             output1 = output1.detach()
-        return output1
+            feat_bridged = feat_bridged.detach()
+        return output1, feat_bridged
 
-    def _forward_secondU(self, x, output1, detach=False):
-        winput = torch.cat([output1, x], dim=1)
+    def _forward_secondU(self, x, output1, feat_bridged, detach=False):
+        # secondU 输入: output1(1ch) + x(2ch) + feat_bridged(50ch)
+        # feat_bridged 包含 firstU 编码器的域特定信息 (CIRL 前), 解决信息丢失问题
+        winput = torch.cat([output1, x, feat_bridged], dim=1)
         if detach:
             winput = winput.detach()
 

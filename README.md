@@ -7,8 +7,9 @@
 **核心问题**：训练于城市地形（Suburban, DenseUrban, OrdinaryUrban, Rural）的路径损耗预测模型，如何泛化到未见过的自然地形（Grassland, Desert, Mountainous, Forest）？
 
 **解决方案**：
-- **双分支架构**：firstU（域泛化粗预测）+ secondU（域内精修）
-- **域泛化技术**：CIRL 因果分解 + Fish 梯度对齐 + SWAD 权重平均
+- **双分支架构**：firstU（域泛化粗预测）+ secondU（域内精修 + 特征桥接）
+- **域泛化技术**：CIRL 因果分解 + Fish 梯度对齐
+- **特征桥接**：firstU 编码器特征 (CIRL 前) 压缩后传入 secondU，解决域信息丢失
 - **智能门控**：多物理先验融合（建筑覆盖率 + 地形高程）实现域感知路由
 
 ## 主要结果
@@ -46,31 +47,25 @@ export SPECTRUMNET_ROOT=/path/to/PPData5D-success
 ### 训练
 
 ```bash
+# DG + 门控训练 (推荐)
+python train.py --exp dg_gate --save_dir run/cbam_dg_gate_bridge_4to4 \
+  --train_terrains 05.Suburban,06.DenseUrban,07.Rural,08.OrdinaryUrban \
+  --test_terrains 01.Grassland,09.Desert,10.Mountainous,11.Forest
+
 # 基线训练（无DG）
 python train.py --exp baseline --save_dir run/baseline_4to4 \
   --train_terrains 05.Suburban,06.DenseUrban,07.Rural,08.OrdinaryUrban \
-  --test_terrain 01.Grassland,09.Desert,10.Mountainous,11.Forest
-
-# DG 训练（CIRL + Fish）
-python train.py --exp fish_causal --save_dir run/dg_4to4 \
-  --train_terrains 05.Suburban,06.DenseUrban,07.Rural,08.OrdinaryUrban \
-  --test_terrain 01.Grassland,09.Desert,10.Mountainous,11.Forest
-
-# 门控训练（复用 firstU，仅训练 secondU）
-python train.py --exp dg_gate --save_dir run/gate_4to4 \
-  --train_terrains 05.Suburban,06.DenseUrban,07.Rural,08.OrdinaryUrban \
-  --test_terrain 01.Grassland,09.Desert,10.Mountainous,11.Forest \
-  --init_firstU run/dg_4to4/Trained_Model_FirstU.pt
+  --test_terrains 01.Grassland,09.Desert,10.Mountainous,11.Forest
 ```
 
 ### 评估
 
 ```bash
-# 标准评估
-python test.py --run_dir run/gate_4to4
+# 标准评估（默认使用多物理先验门控）
+python test.py --run_dir run/cbam_dg_gate_bridge_4to4
 
-# 多物理先验门控评估（需要地形高程信息）
-python scripts/eval_multi_prior_gate.py --run_dir run/gate_4to4
+# 覆盖测试场景
+python test.py --run_dir run/cbam_baseline_4to4 --test_terrain 01.Grassland,09.Desert
 ```
 
 ## 架构设计
@@ -82,8 +77,9 @@ python scripts/eval_multi_prior_gate.py --run_dir run/gate_4to4
 │          │───→│   + CBAM skips   │───→│   + W-CBAM skips │───→│ Gate │──→ output
 │ Tx_prox  │    │   + CIRL(500ch)  │    │   (150ch瓶颈)    │    │      │
 └──────────┘    └──────────────────┘    └──────────────────┘    └──────┘
-                     ↓ detach               ↑ concat(out1, x)        ↑
-                                                                    物理先验
+                     ↓ detach               ↑ concat(out1, x, bridge)  ↑
+                     ↓                                                   物理先验
+              feat_bridge(50ch)
 ```
 
 **门控策略**：
@@ -99,21 +95,19 @@ SpectrumDG/
 ├── test.py                 # 评估入口: 从 checkpoint 复现评估
 │
 ├── model/                  # 网络模型
-│   ├── radiownet.py        #   RadioWNet 双 U-Net 骨干
+│   ├── radiownet.py        #   RadioWNet 双 U-Net 骨干 + 特征桥接
 │   ├── attention.py        #   CBAM 注意力模块
-│   ├── causal.py           #   CIRL 因果分解 + GRL
-│   └── physics.py          #   物理先验模块
+│   └── causal.py           #   CIRL 因果分解 + GRL
 │
 ├── data_process/           # 数据处理
 │   └── dataset.py          #   SpectrumNet 数据集 + DataLoader
 │
 ├── lib/                    # 训练/评估工具
 │   ├── trainer.py          #   两阶段训练器
-│   ├── evaluate.py         #   域感知评估 + 简单阈值门控
+│   ├── evaluate.py         #   MAE+MSE+PSNR 评估 + 多物理先验门控
 │   └── dg.py               #   DG 组件
 │
 ├── scripts/                # 工具脚本
-│   ├── eval_multi_prior_gate.py  # 多物理先验门控评估
 │   └── multi_prior_gate.py       # 门控诊断工具
 │
 ├── run/                    # 实验产物（模型权重 + 日志）

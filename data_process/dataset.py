@@ -72,13 +72,15 @@ class SpectrumNetDataset(Dataset):
     def __init__(self, terrains, z_layer="00", freqs=None,
                  split="train", split_ratio=0.85,
                  root=DEFAULT_DATA_ROOT,
-                 thresh=0.2, max_per_terrain=None, seed=42):
+                 thresh=0.2, max_per_terrain=None, seed=42,
+                 return_terrain=False):
         self.root = root
         self.dir_png = os.path.join(root, "png")
         self.dir_npz = os.path.join(root, "npz")
         self.z_layer = z_layer
         self.freqs = set(freqs) if freqs is not None else None
         self.thresh = thresh
+        self.return_terrain = return_terrain
 
         if terrains == "ALL":
             terrains = self.TERRAIN_ORDER
@@ -143,10 +145,13 @@ class SpectrumNetDataset(Dataset):
         z_i = int(self.z_layer)
         npz = np.load(npz_path)
         bldg = npz['inBldg_zyx'][z_i].astype(np.float32)  # 0/1
+        terrain_yx = npz['terrain_yx'].astype(np.float32) if self.return_terrain else None
         npz.close()
         # 输入 2 通道
         inp = np.stack([bldg, tx_prox], axis=0)  # (2,H,W)
         target = gain[None, ...].astype(np.float32)  # (1,H,W)
+        if self.return_terrain:
+            return torch.from_numpy(inp), torch.from_numpy(target), terrain_id, torch.from_numpy(terrain_yx)
         return torch.from_numpy(inp), torch.from_numpy(target), terrain_id
 
 
@@ -184,7 +189,8 @@ def build_data(cfg):
 
     Returns:
         (train_terrs, test_terrs, train_dl, val_dl, test_dls):
-        test_dls 为 {terrain: DataLoader}, 每个跨域测试场景独立一份。
+        train_dl 返回 3-tuple (inp, tgt, domain_id);
+        val_dl / test_dls 返回 4-tuple (inp, tgt, domain_id, terrain_yx) 以支持多物理先验门控。
     """
     freqs = _parse_list(cfg.freqs) or None
     train_terrs = _parse_list(cfg.train_terrains)
@@ -192,12 +198,19 @@ def build_data(cfg):
     common = dict(z_layer=cfg.z_layer, freqs=freqs, batch_size=cfg.batch_size,
                   num_workers=cfg.num_workers, max_per_terrain=cfg.max_per_terrain,
                   root=cfg.data_root, seed=cfg.seed)
-    train_dl, val_dl, *_ = build_dataloaders(train_terrs, test_terrs[0], **common)
-    # 为每个 test 场景构建独立 DataLoader
+    # 训练集: 不返回 terrain (避免影响训练循环)
+    train_dl, _, *_ = build_dataloaders(train_terrs, test_terrs[0], **common)
+    # 验证集 + 测试集: 返回 terrain (支持多物理先验门控评估)
+    ds_common = dict(z_layer=cfg.z_layer, freqs=freqs, max_per_terrain=cfg.max_per_terrain,
+                     root=cfg.data_root, seed=cfg.seed, return_terrain=True)
+    val_ds = SpectrumNetDataset(train_terrs, split="val", split_ratio=0.85, **ds_common)
+    val_dl = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
+                        num_workers=cfg.num_workers)
     test_dls = {}
     for tt in test_terrs:
-        _, _, tdl, *_ = build_dataloaders(train_terrs, tt, **common)
-        test_dls[tt] = tdl
+        test_ds = SpectrumNetDataset([tt], split="test", split_ratio=1.0, **ds_common)
+        test_dls[tt] = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False,
+                                  num_workers=cfg.num_workers)
     print(f"train={len(train_dl.dataset)} val={len(val_dl.dataset)} "
           f"test={{{', '.join(f'{t}={len(test_dls[t].dataset)}' for t in test_terrs)}}}")
     return train_terrs, test_terrs, train_dl, val_dl, test_dls

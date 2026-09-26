@@ -5,8 +5,8 @@
 ### 1.1 核心挑战
 
 在双分支架构中：
-- **firstU**：域泛化网络（CIRL + Fish + SWAD），跨域泛化能力强
-- **secondU**：域内精修网络（纯 ERM），域内精度高但跨域性能差
+- **firstU**：域泛化网络（CIRL + Fish），跨域泛化能力强
+- **secondU**：域内精修网络（纯 ERM + 特征桥接），域内精度高但跨域性能差
 
 **问题**：如何判断输入样本来自域内还是跨域，从而选择合适的网络？
 
@@ -177,12 +177,14 @@ use_secondU = bldg_strong or (elev_low and bldg_weak)
 
 ### 5.1 评估脚本
 
+多物理先验门控已集成到主评估流程 (`lib/evaluate.py`)，`test.py` 默认使用 `gate='multi_prior'`：
+
 ```bash
-# 多物理先验门控评估
-python scripts/eval_multi_prior_gate.py --run_dir run/cbam_dg_gate_4to4
+# 标准评估（自动使用多物理先验门控）
+python test.py --run_dir run/cbam_dg_gate_bridge_4to4
 
 # 输出包含：
-# - 域内性能（val 集）
+# - 域内性能（val 集）: MAE/MSE/PSNR × firstU/secondU/gated
 # - 跨域性能（各测试场景）
 # - 门控路由统计
 ```
