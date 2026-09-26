@@ -71,12 +71,12 @@ CBAM 为自注意力模块（无需门控信号），在 skip 连接处精炼编
 ```
 Stage 1 (firstU):  model.phase = "firstU"
   → firstU 有梯度, secondU 全 detach (梯度隔离)
-  → 监督 output1, 验证集选优 NMSE_firstU
+  → 监督 output1, 验证集选优 MSE_firstU
   → 保存 Trained_Model_FirstU.pt
 
 Stage 2 (secondU): model.phase = "secondU"
   → firstU 全 detach, secondU 有梯度 (只训练 W-Net)
-  → 监督 output2, 验证集选优 NMSE_secondU
+  → 监督 output2, 验证集选优 MSE_secondU
   → 保存 Trained_Model_SecondU.pt (含两阶段全部权重)
 ```
 

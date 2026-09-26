@@ -109,8 +109,7 @@
 - **骨干**：CBAM U-Net（14 个 CBAM 模块，双阶段训练）
 - **瓶颈层**：CIRL 因果分解（λ_dom=1.0, λ_inv=0.1, λ_orth=0.1, λ_grl=1.0）
 - **损失函数**：Fish 梯度对齐（λ_fish=0.1）
-- **移除**：MixStyle（增益有限且与 CIRL 冲突）
-- **可选**：SWAD 权重平均（默认关闭）
+- **移除**：MixStyle（增益有限且与 CIRL 冲突）、SWAD（无额外增益）
 
 训练配置：100 epoch/阶段，patience=15，两阶段（firstU → secondU），验证集从训练集 85/15 划分。
 

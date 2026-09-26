@@ -152,42 +152,40 @@ L_CIRL = λ_dom · CE(z_spe, domain) + λ_inv · CE(z_inv, domain; GRL) + λ_ort
 ```
 Stage 1: model.phase = "firstU"
   → firstU 有梯度, secondU 全 detach
-  → 监督 output1, 验证选优 NMSE_firstU
+  → 监督 output1, 验证选优 MSE_firstU
   → 保存 Trained_Model_FirstU.pt
 
 Stage 2: model.phase = "secondU"
   → firstU 全 detach, secondU 有梯度
-  → 监督 output2, 验证选优 NMSE_secondU
+  → 监督 output2, 验证选优 MSE_secondU
   → 保存 Trained_Model_SecondU.pt (含两阶段全部权重)
 ```
 
 每阶段均支持:
 - **早停**: patience 轮验证集无改善则停止
 - **学习率调度**: StepLR, step_size = num_epochs/3, gamma=0.5
-- **SWAD 权重平均**（可选）: 自 swad_start_ratio 起累积权重
-- **DG 模块组合**: CIRL / Fish / SWAD 可任意组合
+- **DG 模块组合**: CIRL / Fish 可任意组合
 
 ## 6. 实验预设系统
 
 通过 `configs.py` 的 `EXPERIMENTS` 字典定义预设，命令行 `--exp` 选择:
 
-| 预设 | CIRL | Fish | SWAD | 说明 |
-|---|---|---|---|---|
-| baseline | - | - | - | ERM 基线 |
-| causal | ✓ | - | - | 瓶颈层因果分解 |
-| fish | - | ✓ | - | 梯度对齐 |
-| fish_causal | ✓ | ✓ | - | 最优组合 |
-| fish_causal_swad | ✓ | ✓ | ✓ | 含权重平均 |
+| 预设 | CIRL | Fish | 说明 |
+|---|---|---|---|
+| baseline | - | - | ERM 基线 |
+| causal | ✓ | - | 瓶颈层因果分解 |
+| fish | - | ✓ | 梯度对齐 |
+| fish_causal | ✓ | ✓ | 最优组合 (DG) |
+| dg_gate | ✓ | ✓ | DG + 门控 (Stage2 纯 ERM) |
 
-命令行开关（`--use_causal`, `--use_fish`, `--use_swad`）可覆盖预设。
+命令行开关（`--use_causal`, `--use_fish`）可覆盖预设。
 
 ## 7. 文件结构
 
 ```
 model/
 ├── __init__.py          # 包导出
-├── radiownet.py         # RadioWNet 双 U-Net 骨干
+├── radiownet.py         # RadioWNet 双 U-Net 骨干 + 特征桥接
 ├── attention.py         # CBAM 注意力模块
-├── causal.py            # CIRL 因果分解 + GRL
-└── physics.py           # 物理先验 (SignalMutationAttention, PhysicsElection)
+└── causal.py            # CIRL 因果分解 + GRL
 ```

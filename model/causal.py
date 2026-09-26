@@ -62,8 +62,6 @@ class CausalDecomposer(nn.Module):
             nn.Linear(channels, num_domains))
         self.grl = GRL(lambda_grl)
         self._last_aux = None  # 训练时暂存 (logits_spe, logits_inv, orth)
-        self._last_spe_feat = None  # eval 时暂存 z_spe GAP 特征 (供源域/未见域门控)
-        self._last_inv_feat = None  # eval 时暂存 z_inv GAP 特征 (门控诊断/备选信号)
 
     def forward(self, x):
         z_inv = self.proj_inv(x)   # (B, C, H, W) → 解码器
@@ -77,12 +75,6 @@ class CausalDecomposer(nn.Module):
             zs = F.adaptive_avg_pool2d(z_spe, 1).flatten(1)  # (B, C)
             orth = (zi * zs).sum(dim=1).abs().mean()
             self._last_aux = (logits_spe, logits_inv, orth)
-            self._last_spe_feat = None
-            self._last_inv_feat = None
         else:
-            # 推理时缓存 z_spe/z_inv GAP 特征 (供门控马氏距离评分, 优于饱和的 softmax 置信度)
-            with torch.no_grad():
-                self._last_spe_feat = F.adaptive_avg_pool2d(z_spe, 1).flatten(1)  # (B, C)
-                self._last_inv_feat = F.adaptive_avg_pool2d(z_inv, 1).flatten(1)  # (B, C)
             self._last_aux = None
         return z_inv
