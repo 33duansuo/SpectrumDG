@@ -6,6 +6,10 @@ skip 连接升级为 CBAM 注意力精炼, 瓶颈层可插入 CausalDecomposer�
 两阶段训练通过 phase 属性切换, .detach() 保证梯度隔离 (设计如此, 非 bug):
   phase="firstU":  firstU 有梯度, secondU 全 detach (Stage 1 只训练 firstU)
   phase="secondU": firstU 全 detach, secondU 有梯度 (Stage 2 只训练 W-Net)
+  phase="joint":   双专家架构使用, 两 U 同批更新, secondU 输入 detach 隔离
+
+注: firstU→secondU 的特征桥接 (feat_bridge) 经消融确认无收益已移除,
+secondU 输入固定为 [output1, x]。
 """
 import torch
 import torch.nn as nn
@@ -86,17 +90,8 @@ class RadioWNet(nn.Module):
             self.conv_up00 = convrelu(20 + 10 + inputs, 20, 5, 2, 1)
         self.conv_up000 = convrelu(20 + inputs, 1, 5, 2, 1)
 
-        # 特征桥接: 将 firstU 编码器特征 (CIRL 前) 传递给 secondU
-        # 500ch → 50ch (1x1 卷积压缩), 解决 secondU 无法访问域特定信息的问题
-        # 上采样到输入尺寸 (128x128) 以匹配 output1 和 x
-        self.feat_bridge = nn.Sequential(
-            nn.Conv2d(500, 50, kernel_size=1),
-            nn.BatchNorm2d(50),
-            nn.ReLU(inplace=True),
-            nn.Upsample(size=(128, 128), mode='bilinear', align_corners=False),
-        )
-
-        self.Wlayer00 = convrelu(inputs + 1 + 50, 20, 3, 1, 1)  # 输入: output1(1) + x(2) + bridge(50)
+        # secondU: 输入为 output1(1ch) + x(2ch), 无特征桥接 (消融确认无收益)
+        self.Wlayer00 = convrelu(inputs + 1, 20, 3, 1, 1)
         self.Wlayer0 = convrelu(20, 30, 5, 2, 2)
         self.Wlayer1 = convrelu(30, 40, 5, 2, 2)
         self.Wlayer10 = convrelu(40, 50, 5, 2, 1)
@@ -114,9 +109,9 @@ class RadioWNet(nn.Module):
         self.Wconv_up10 = convrelu(50 + 50, 40, 5, 2, 1)
         self.Wconv_up1 = convreluT(40 + 40, 30, 6, 2)
         self.Wconv_up0 = convreluT(30 + 30, 20, 6, 2)
-        # secondU 最终 skip: decoder(20) + wlayer00(20) + winput(1+2+50=53)
-        self.Wconv_up00 = convrelu(20 + 20 + (inputs + 1 + 50), 20, 5, 2, 1)
-        self.Wconv_up000 = convrelu(20 + (inputs + 1 + 50), 1, 5, 2, 1)
+        # secondU 最终 skip: decoder(20) + wlayer00(20) + winput(1+inputs)
+        self.Wconv_up00 = convrelu(20 + 20 + (inputs + 1), 20, 5, 2, 1)
+        self.Wconv_up000 = convrelu(20 + (inputs + 1), 1, 5, 2, 1)
 
         # CBAM 注意力: firstU skip 连接 (7 个), 编码器特征 → CBAM → cat(decoder, refined)
         self.cbam4 = CBAM(300)
@@ -146,11 +141,15 @@ class RadioWNet(nn.Module):
         x0 = x[:, 0:self.inputs, :, :]
 
         if self.phase == "firstU":
-            output1, feat_bridged = self._forward_firstU(x, x0)
-            output2 = self._forward_secondU(x, output1, feat_bridged, detach=True)
-        else:
-            output1, feat_bridged = self._forward_firstU(x, x0, detach=True)
-            output2 = self._forward_secondU(x, output1, feat_bridged, detach=False)
+            output1 = self._forward_firstU(x, x0)
+            output2 = self._forward_secondU(x, output1, detach=True)
+        elif self.phase == "joint":
+            # 双专家架构: firstU/secondU 同批训练 (secondU 输入 detach 保持梯度隔离)
+            output1 = self._forward_firstU(x, x0)
+            output2 = self._forward_secondU(x, output1.detach(), detach=False)
+        else:  # phase == "secondU"
+            output1 = self._forward_firstU(x, x0, detach=True)
+            output2 = self._forward_secondU(x, output1, detach=False)
 
         return [output1, output2]
 
@@ -164,10 +163,7 @@ class RadioWNet(nn.Module):
         layer3 = self.layer3(layer20)
         layer4 = self.layer4(layer3)
         layer5 = self.layer5(layer4)
-        
-        # 保存 CIRL 前的特征，通过桥接传递给 secondU
-        feat_bridged = self.feat_bridge(layer5)
-        
+
         if self.causal is not None:
             # z_inv(域不变) → 解码器; aux 暂存于 self.causal._last_aux
             layer5 = self.causal(layer5)
@@ -193,15 +189,11 @@ class RadioWNet(nn.Module):
         layer000u = torch.cat([layer000u, x0], dim=1)
         output1 = self.conv_up000(layer000u)
 
-        if detach:
-            output1 = output1.detach()
-            feat_bridged = feat_bridged.detach()
-        return output1, feat_bridged
+        return output1.detach() if detach else output1
 
-    def _forward_secondU(self, x, output1, feat_bridged, detach=False):
-        # secondU 输入: output1(1ch) + x(2ch) + feat_bridged(50ch)
-        # feat_bridged 包含 firstU 编码器的域特定信息 (CIRL 前), 解决信息丢失问题
-        winput = torch.cat([output1, x, feat_bridged], dim=1)
+    def _forward_secondU(self, x, output1, detach=False):
+        # secondU 输入: output1(1ch) + x(2ch)
+        winput = torch.cat([output1, x], dim=1)
         if detach:
             winput = winput.detach()
 
@@ -241,3 +233,102 @@ class RadioWNet(nn.Module):
         if detach:
             output2 = output2.detach()
         return output2
+
+
+class CBAMUNet(nn.Module):
+    """单 U-Net 泛化专家 (双专家架构的跨域分支)。
+
+    结构复用 RadioWNet 的 firstU (编码器 layer0-5 + CBAM skip + 解码器),
+    瓶颈层可插入 CausalDecomposer, 训练时配合 Fish 梯度对齐。
+    与 RadioWNet 的区别: 无 secondU 级联, 是独立的端到端网络。
+
+    Args:
+        inputs: 输入通道数 (SpectrumDG 场景为 2)
+        use_causal: 瓶颈层是否插入 CausalDecomposer
+        num_domains: 训练域个数 (仅 use_causal 时用于域分类器输出维)
+        causal_lambda_grl: GRL 梯度反转系数
+    """
+
+    def __init__(self, inputs=2, use_causal=False, num_domains=0,
+                 causal_lambda_grl=1.0):
+        super().__init__()
+        self.inputs = inputs
+
+        self.causal = None
+        if use_causal:
+            self.causal = CausalDecomposer(channels=500, num_domains=num_domains,
+                                           lambda_grl=causal_lambda_grl)
+
+        if inputs <= 3:
+            self.layer00 = convrelu(inputs, 6, 3, 1, 1)
+            self.layer0 = convrelu(6, 40, 5, 2, 2)
+        else:
+            self.layer00 = convrelu(inputs, 10, 3, 1, 1)
+            self.layer0 = convrelu(10, 40, 5, 2, 2)
+
+        self.layer1 = convrelu(40, 50, 5, 2, 2)
+        self.layer10 = convrelu(50, 60, 5, 2, 1)
+        self.layer2 = convrelu(60, 100, 5, 2, 2)
+        self.layer20 = convrelu(100, 100, 3, 1, 1)
+        self.layer3 = convrelu(100, 150, 5, 2, 2)
+        self.layer4 = convrelu(150, 300, 5, 2, 2)
+        self.layer5 = convrelu(300, 500, 5, 2, 2)
+
+        self.conv_up5 = convreluT(500, 300, 4, 1)
+        self.conv_up4 = convreluT(300 + 300, 150, 4, 1)
+        self.conv_up3 = convreluT(150 + 150, 100, 4, 1)
+        self.conv_up20 = convrelu(100 + 100, 100, 3, 1, 1)
+        self.conv_up2 = convreluT(100 + 100, 60, 6, 2)
+        self.conv_up10 = convrelu(60 + 60, 50, 5, 2, 1)
+        self.conv_up1 = convreluT(50 + 50, 40, 6, 2)
+        self.conv_up0 = convreluT(40 + 40, 20, 6, 2)
+        if inputs <= 3:
+            self.conv_up00 = convrelu(20 + 6 + inputs, 20, 5, 2, 1)
+        else:
+            self.conv_up00 = convrelu(20 + 10 + inputs, 20, 5, 2, 1)
+        self.conv_up000 = convrelu(20 + inputs, 1, 5, 2, 1)
+
+        self.cbam4 = CBAM(300)
+        self.cbam3 = CBAM(150)
+        self.cbam20 = CBAM(100)
+        self.cbam2 = CBAM(100)
+        self.cbam10 = CBAM(60)
+        self.cbam1 = CBAM(50)
+        self.cbam0 = CBAM(40)
+
+    def forward(self, x):
+        x0 = x[:, 0:self.inputs, :, :]
+
+        layer00 = self.layer00(x0)
+        layer0 = self.layer0(layer00)
+        layer1 = self.layer1(layer0)
+        layer10 = self.layer10(layer1)
+        layer2 = self.layer2(layer10)
+        layer20 = self.layer20(layer2)
+        layer3 = self.layer3(layer20)
+        layer4 = self.layer4(layer3)
+        layer5 = self.layer5(layer4)
+
+        if self.causal is not None:
+            layer5 = self.causal(layer5)
+
+        layer4u = self.conv_up5(layer5)
+        layer4u = torch.cat([layer4u, self.cbam4(layer4)], dim=1)
+        layer3u = self.conv_up4(layer4u)
+        layer3u = torch.cat([layer3u, self.cbam3(layer3)], dim=1)
+        layer20u = self.conv_up3(layer3u)
+        layer20u = torch.cat([layer20u, self.cbam20(layer20)], dim=1)
+        layer2u = self.conv_up20(layer20u)
+        layer2u = torch.cat([layer2u, self.cbam2(layer2)], dim=1)
+        layer10u = self.conv_up2(layer2u)
+        layer10u = torch.cat([layer10u, self.cbam10(layer10)], dim=1)
+        layer1u = self.conv_up10(layer10u)
+        layer1u = torch.cat([layer1u, self.cbam1(layer1)], dim=1)
+        layer0u = self.conv_up1(layer1u)
+        layer0u = torch.cat([layer0u, self.cbam0(layer0)], dim=1)
+        layer00u = self.conv_up0(layer0u)
+        layer00u = torch.cat([layer00u, layer00], dim=1)
+        layer00u = torch.cat([layer00u, x0], dim=1)
+        layer000u = self.conv_up00(layer00u)
+        layer000u = torch.cat([layer000u, x0], dim=1)
+        return self.conv_up000(layer000u)

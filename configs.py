@@ -9,9 +9,11 @@ from data_process.dataset import DEFAULT_DATA_ROOT
 
 @dataclass
 class TrainConfig:
+    # ---- 架构 ----
+    arch: str = "wnet"             # "wnet" = RadioWNet 级联; "dual" = 双专家并行
     # ---- 数据 ----
-    train_terrains: str = "05.Suburban,06.DenseUrban,08.OrdinaryUrban"
-    test_terrains: str = "01.Grassland"
+    train_terrains: str = "05.Suburban,06.DenseUrban,07.Rural,08.OrdinaryUrban"
+    test_terrains: str = "01.Grassland,02.Island,03.Ocean,04.Lake,09.Desert,10.Mountainous,11.Forest"
     z_layer: str = "00"
     freqs: str = ""              # 逗号分隔 freq 白名单; 空 = 全部
     data_root: str = DEFAULT_DATA_ROOT  # PPData5D-success 根目录
@@ -40,12 +42,15 @@ class TrainConfig:
     report: str = ""                 # DG 报告 JSON 路径; 空 = save_dir/dg_report.json
 
 
-# 实验预设: train.py --exp fish_causal --save_dir run/fish_causal_3urban
+# 实验预设: train.py --exp <name>
 EXPERIMENTS = {
+    # 基线: CBAM RadioWNet 纯 ERM 级联两阶段
     "baseline": {},
-    "causal": {"use_causal": True},
-    "fish": {"use_fish": True},
-    "fish_causal": {"use_causal": True, "use_fish": True},
-    # DG-firstU + 纯ERM-secondU + 物理先验门控
+    # 级联门控主线: firstU=CIRL+Fish, secondU=纯ERM, 多物理先验 v4 门控推理
+    # (级联方案最优 0.5678; 特征桥接经消融无收益已移除)
     "dg_gate": {"use_causal": True, "use_fish": True, "dg_second": False},
+    # 双专家并行架构 (当前主线): 域内专家(RadioWNet 纯ERM) + 泛化专家(CBAMUNet+CIRL+Fish)
+    # 同批联合训练, 多物理先验门控推理路由
+    "dual_expert": {"arch": "dual", "use_causal": True, "use_fish": True,
+                    "dg_second": False},
 }

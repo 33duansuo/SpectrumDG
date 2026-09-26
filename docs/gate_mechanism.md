@@ -6,7 +6,7 @@
 
 在双分支架构中：
 - **firstU**：域泛化网络（CIRL + Fish），跨域泛化能力强
-- **secondU**：域内精修网络（纯 ERM + 特征桥接），域内精度高但跨域性能差
+- **secondU**：域内精修网络（纯 ERM），域内精度高但跨域性能差
 
 **问题**：如何判断输入样本来自域内还是跨域，从而选择合适的网络？
 
@@ -108,6 +108,8 @@ use_secondU = bldg_strong or (elev_low and bldg_weak)
 | **建筑 + 高程组合 (v4)** | **90.7%** | **+6.4%，最优** |
 | Isolation Forest (全特征) | 70.5% | 学习式，不如规则 |
 
+> 注：上表为离线分析记录。单特征阈值门控曾是代码中的一个可选模式，重构后已删除——代码内门控统一为多物理先验 v4，无其他模式与阈值参数。
+
 ### 3.2 端到端性能
 
 **实验设置**：
@@ -175,13 +177,24 @@ use_secondU = bldg_strong or (elev_low and bldg_weak)
 
 ## 5. 使用指南
 
+### 5.0 两代架构下的语义
+
+同一条 v4 规则在两代架构中路由目标不同，但物理含义一致（"像源域 → 域内强模型"）：
+
+| 架构 | 规则 True | 规则 False |
+|---|---|---|
+| 级联门控（RadioWNet 两阶段） | secondU（域内精修） | firstU（DG 泛化） |
+| **双专家并行（dual_expert）** | **expert_in（纯 ERM RadioWNet）** | **expert_dg（CBAMUNet+CIRL+Fish）** |
+
+双专家架构下误路由代价更对称：两个方向选中的都是专职强专家，即使约 10% 域内样本被误路由（gate_to_in_frac≈0.89），gated 域内性能也不会大幅下降。详见 [dual_expert.md](dual_expert.md)。
+
 ### 5.1 评估脚本
 
-多物理先验门控已集成到主评估流程 (`lib/evaluate.py`)，`test.py` 默认使用 `gate='multi_prior'`：
+多物理先验门控已集成到主评估流程 (`lib/evaluate.py`) 且为唯一门控模式：训练期验证调用 `evaluate(model, loader, device)` 只算裸指标，`evaluate_report()` 与 `test.py` 恒定以 `use_gate=True` 走 v4 规则逐样本判定，无阈值参数：
 
 ```bash
-# 标准评估（自动使用多物理先验门控）
-python test.py --run_dir run/cbam_dg_gate_bridge_4to4
+# 标准评估（恒定使用多物理先验 v4 门控）
+python test.py --run_dir run/dual_expert_4to7
 
 # 输出包含：
 # - 域内性能（val 集）: MAE/MSE/PSNR × firstU/secondU/gated

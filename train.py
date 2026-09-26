@@ -7,13 +7,12 @@
 用法:
   cd /data/userSZ/duanrj/SpectrumDG
   conda activate wifi-diff
-  # 基线
-  CUDA_VISIBLE_DEVICES=5 python train.py --train_terrains 05.Suburban,06.DenseUrban,08.OrdinaryUrban --test_terrain 01.Grassland --save_dir run/baseline_3urban
-  # CIRL 因果分解 (瓶颈层)
-  CUDA_VISIBLE_DEVICES=5 python train.py --exp causal --save_dir run/causal_3urban
-  # Fish 梯度对齐 (损失函数层)
-  CUDA_VISIBLE_DEVICES=5 python train.py --exp fish --save_dir run/fish_3urban
-  # Fish+CIRL: --exp fish_causal
+  # 双专家并行 (当前主线, 默认 4 城市 → 7 未见场景)
+  CUDA_VISIBLE_DEVICES=4 python train.py --exp dual_expert --save_dir run/dual_expert_4to7
+  # 级联 DG + 多物理先验门控
+  CUDA_VISIBLE_DEVICES=4 python train.py --exp dg_gate --save_dir run/dg_gate_4to7
+  # 基线 (纯 ERM)
+  CUDA_VISIBLE_DEVICES=4 python train.py --exp baseline --save_dir run/baseline_4to7
 """
 import argparse
 import json
@@ -29,6 +28,7 @@ from lib.dg import build_domain_map
 from lib.evaluate import evaluate_report
 from lib.trainer import Trainer
 from model.radiownet import RadioWNet
+from model.dual_expert import DualExpertNet
 
 
 def parse_args():
@@ -36,7 +36,7 @@ def parse_args():
     # 实验预设 (与命令行 DG 开关等价, 二选一; 开关优先)
     p.add_argument("--exp", type=str, default="baseline",
                    choices=sorted(EXPERIMENTS.keys()),
-                   help="实验预设: baseline/causal/fish/fish_causal")
+                   help="实验预设: baseline(纯ERM) / dg_gate(级联门控) / dual_expert(双专家)")
     p.add_argument("--gpu", type=int, default=None, help="可见 GPU 内的编号 (建议用 CUDA_VISIBLE_DEVICES 代替)")
     # 数据
     p.add_argument("--train_terrains", type=str, default=None, help="训练场景, 逗号分隔")
@@ -68,10 +68,7 @@ def parse_args():
                    help="z_inv 对抗域分类 CE 权重 (经 GRL, DANN 风格, 典型 0.01~1.0)")
     p.add_argument("--causal_lambda_orth", type=float, default=None, help="z_inv/z_spe 正交解相关权重")
     p.add_argument("--causal_lambda_grl", type=float, default=None, help="GRL 梯度反转系数")
-    # 两阶段 DG 分工 + 初始化复用
-    p.add_argument("--dg_second", "--no_dg_second", dest="dg_second", action="store_false",
-                   default=None,
-                   help="Stage2 (secondU) 纯 ERM 域内精修, 不挂 Causal/Fish (dg_gate 实验)")
+    # 初始化复用
     p.add_argument("--init_firstU", type=str, default=None,
                    help="加载已有 firstU 权重 (如 run/xxx/Trained_Model_FirstU.pt) 并跳过 Stage1; "
                         "Stage1/Stage2 梯度完全隔离, 数学上等价于重跑")
@@ -98,6 +95,10 @@ def build_config(args):
 
 
 def build_model(cfg, num_domains, device):
+    if cfg.arch == "dual":
+        # 双专家并行: 域内专家(RadioWNet 纯ERM) + 泛化专家(CBAMUNet+CIRL+Fish)
+        return DualExpertNet(inputs=2, num_domains=num_domains,
+                             causal_lambda_grl=cfg.causal_lambda_grl).to(device)
     return RadioWNet(inputs=2, phase="firstU",
                      use_causal=cfg.use_causal,
                      num_domains=num_domains if cfg.use_causal else 0,
@@ -134,6 +135,52 @@ def main():
     trainer = Trainer(model, {'train': train_dl, 'val': val_dl}, device, cfg, domain_map)
 
     ckpt_interval = args.checkpoint_interval
+
+    # ===== 双专家并行架构: 联合训练 =====
+    if cfg.arch == "dual":
+        print("\n===== Dual-Expert 联合训练 (in=ERM, dg=CIRL+Fish) =====")
+        resume_dual = None
+        if args.resume:
+            auto_path = os.path.join(cfg.save_dir, "checkpoint_dual.pt")
+            resume_dual = auto_path if args.resume == "auto" else args.resume
+            if not os.path.isfile(resume_dual):
+                print(f"[Resume] checkpoint 不存在: {resume_dual}, 从头开始训练")
+                resume_dual = None
+        model = trainer.train_dual(resume_from=resume_dual,
+                                   checkpoint_interval=ckpt_interval)
+        ckpt = os.path.join(cfg.save_dir, "Trained_Model_DualExpert.pt")
+        torch.save(model.state_dict(), ckpt)
+        print(f"saved: {ckpt}")
+
+        print("\n===== Test: 分域评估 (expert_in + expert_dg + gated) =====")
+        report = evaluate_report(model, val_dl, test_dls, test_terrs, device)
+        report["arch"] = cfg.arch  # dual: firstU键=泛化专家, secondU键=域内专家
+
+        rep_path = cfg.report or os.path.join(cfg.save_dir, "dg_report.json")
+        with open(rep_path, "w") as f:
+            json.dump(report, f, indent=2)
+        print(f"\nDG 报告保存至 {rep_path}")
+        print(f"\n[结果] in_domain MAE_expert_in = {report['indomain']['MAE_secondU']:.6f} "
+              f"MSE_expert_in = {report['indomain']['MSE_secondU']:.6f} "
+              f"PSNR_expert_in = {report['indomain']['PSNR_secondU']:.4f}dB")
+        print(f"[结果] in_domain MAE_expert_dg = {report['indomain']['MAE_firstU']:.6f} "
+              f"MSE_expert_dg = {report['indomain']['MSE_firstU']:.6f} "
+              f"PSNR_expert_dg = {report['indomain']['PSNR_firstU']:.4f}dB")
+        print(f"[结果] cross_avg MAE_expert_dg = {report['cross_avg']['MAE_firstU']:.6f} "
+              f"MSE_expert_dg = {report['cross_avg']['MSE_firstU']:.6f} "
+              f"PSNR_expert_dg = {report['cross_avg']['PSNR_firstU']:.4f}dB")
+        if 'MAE_gated' in report['cross_avg']:
+            cross_fracs = [report['cross_' + t].get('gate_second_frac', 0) for t in test_terrs]
+            frac_str = '/'.join(f'{v:.3f}' for v in cross_fracs)
+            print(f"[结果] in_domain MAE_gated = {report['indomain']['MAE_gated']:.6f} "
+                  f"MSE_gated = {report['indomain']['MSE_gated']:.6f} "
+                  f"PSNR_gated = {report['indomain']['PSNR_gated']:.4f}dB")
+            print(f"[结果] cross_avg MAE_gated = {report['cross_avg']['MAE_gated']:.6f} "
+                  f"MSE_gated = {report['cross_avg']['MSE_gated']:.6f} "
+                  f"PSNR_gated = {report['cross_avg']['PSNR_gated']:.4f}dB "
+                  f"(gate_to_in_frac: {report['indomain'].get('gate_second_frac', 0):.3f} "
+                  f"in-domain / {frac_str} cross)")
+        return
 
     # ===== Stage 1: firstU 训练 =====
     print("\n===== Stage 1: firstU 训练 =====")
@@ -177,6 +224,7 @@ def main():
     # ===== 评估: in-domain + cross-domain (多场景) =====
     print("\n===== Test: 分域评估 (firstU + secondU + gated) =====")
     report = evaluate_report(model, val_dl, test_dls, test_terrs, device)
+    report["arch"] = cfg.arch
 
     rep_path = cfg.report or os.path.join(cfg.save_dir, "dg_report.json")
     with open(rep_path, "w") as f:

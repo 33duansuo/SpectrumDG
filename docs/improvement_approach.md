@@ -84,20 +84,18 @@ Stage 2 (secondU): model.phase = "secondU"
 
 ## 5. 实验预设系统
 
-通过 `configs.py` 的 `EXPERIMENTS` 字典定义预设，命令行 `--exp` 选择，命令行开关可覆盖预设：
+通过 `configs.py` 的 `EXPERIMENTS` 字典定义预设，命令行 `--exp` 选择，命令行开关可覆盖预设。重构后只保留主线三个预设（历史消融预设 causal/fish/fish_causal 已删除，实验记录见 [validation_results.md](validation_results.md)）：
 
 | 预设 | CIRL | Fish | 说明 |
 |---|---|---|---|
 | baseline | - | - | ERM 基线 |
-| causal | ✓ | - | 瓶颈层因果分解 |
-| fish | - | ✓ | 梯度对齐 |
-| fish_causal | ✓ | ✓ | DG 最优组合 |
-| dg_gate | ✓ | ✓ | DG + 门控 (Stage2 纯 ERM) |
+| dg_gate | ✓ | ✓ | 级联门控 (firstU=DG, Stage2 纯 ERM) |
+| dual_expert | ✓（仅 dg 专家） | ✓（仅 dg 专家） | 双专家并行（当前主线） |
 
 用法示例：
 ```bash
 # 实验预设
-python train.py --exp fish_causal --save_dir run/fish_causal_3urban
+python train.py --exp dg_gate --save_dir run/dg_gate_4to7
 
 # 命令行开关覆盖
 python train.py --exp baseline --use_causal --causal_lambda_inv 0.05 --save_dir run/custom
@@ -105,15 +103,17 @@ python train.py --exp baseline --use_causal --causal_lambda_inv 0.05 --save_dir 
 
 ## 6. 最终架构
 
-**骨干**：CBAM U-Net（双级联 U-Net，14 个 CBAM 模块 + 2 个 CausalDecomposer）
+> 2026-09-26 更新：消融实验（详见 [validation_results.md](validation_results.md) §8）确认 Fish 必选、SWAD 与特征桥接均无增益；级联两阶段还暴露出"强 DG firstU 使 secondU 退化"的结构性矛盾。主线已转向**双专家并行架构**（[dual_expert.md](dual_expert.md)），本节保留级联方案的最终配置作为对照。
+
+**级联门控方案（已完成验证，跨域 NMSE 0.5678）**：
+
+**骨干**：CBAM U-Net（双级联 U-Net，14 个 CBAM 模块 + 1 个 CausalDecomposer）
 
 **域泛化模块**：
 - 瓶颈层：CIRL 因果分解（仅 firstU layer5，secondU 纯 ERM）
 - 损失函数：Fish 梯度对齐（仅对 ERM loss 计算逐域梯度惩罚）
 
-**特征桥接**：
-- firstU 编码器 layer5 (CIRL 前) → 1×1 卷积压缩 (500→50ch) + 上采样 → 传入 secondU
-- 解决 secondU 无法访问域特定信息的问题
+**特征桥接**：~~firstU 编码器 layer5 (CIRL 前) → 1×1 卷积压缩 (500→50ch) + 上采样 → 传入 secondU~~ —— **消融证明无收益（bridge 在域内/跨域全部略差于 no-bridge），重构时代码已物理删除（`use_bridge`/`feat_bridge` 不再存在）**。
 
 **门控推理**：
 - 多物理先验 v4 规则：建筑覆盖率 + 地形高程组合
@@ -123,10 +123,16 @@ python train.py --exp baseline --use_causal --causal_lambda_inv 0.05 --save_dir 
 - 两阶段训练：Stage 1 监督 firstU（output1），Stage 2 监督 secondU（output2）
 - 验证集从训练集 85/15 划分（防止测试集泄露）
 - 早停机制：patience=15 轮无改善则停止
+- 100 epoch/阶段（原 200 轮 + SWAD 已证明多余）
 
-**数据划分**（默认配置）：
-- 训练域：05.Suburban, 06.DenseUrban, 08.OrdinaryUrban（3 城市场景）
-- 测试域：01.Grassland（自然场景）
-- 4to4 实验：训练 4 城市 → 测试 4 自然（Grassland, Desert, Mountainous, Forest）
+**双专家并行方案（当前主线，`--exp dual_expert`）**：
+- expert_in：纯 ERM CBAM RadioWNet（无桥接），专职域内
+- expert_dg：CBAM 单 U-Net + CIRL + Fish，专职跨域
+- 单阶段联合训练，多物理先验门控推理择优
+
+**数据划分**（默认配置，11 场景全利用）：
+- 训练域（4 城市）：05.Suburban, 06.DenseUrban, 07.Rural, 08.OrdinaryUrban
+- 跨域测试域（7 未见场景）：01.Grassland, 02.Island, 03.Ocean, 04.Lake, 09.Desert, 10.Mountainous, 11.Forest（4 陆地自然 + 3 水域）
+- 历史 4to4 实验仅测 4 陆地自然（Grassland, Desert, Mountainous, Forest），结果存档不与 4to7 混比
 
 **域标签**：terrain_id（0-10，按 TERRAIN_ORDER 全序），用于 CIRL 域分类与 Fish 逐域梯度计算。

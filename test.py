@@ -7,11 +7,11 @@ in-domain + cross-domain 的 MAE/MSE/PSNR 报告。
 用法:
   cd /data/userSZ/duanrj/SpectrumDG
   conda activate wifi-diff
-  CUDA_VISIBLE_DEVICES=5 python test.py --run_dir run/baseline_3urban
-  # 覆盖测试场景 / checkpoint
-  python test.py --run_dir run/baseline_3urban --test_terrain 01.Grassland,02.Island
-  # 旧实验目录 (无 config.json, 需用 --exp 指明训练时预设)
-  python test.py --run_dir run/causal_3urban --exp causal
+  CUDA_VISIBLE_DEVICES=4 python test.py --run_dir run/dual_expert_4to7
+  # 覆盖测试场景
+  python test.py --run_dir run/dual_expert_4to7 --test_terrain 01.Grassland,02.Island
+  # 无 config.json 的旧实验目录需用 --exp 指明预设 (仅 baseline/dg_gate/dual_expert)
+  python test.py --run_dir run/xxx --exp dg_gate
 """
 import argparse
 import json
@@ -26,6 +26,7 @@ from data_process.dataset import SpectrumNetDataset, TERRAIN_ORDER
 from torch.utils.data import DataLoader
 from lib.evaluate import evaluate_report
 from model.radiownet import RadioWNet
+from model.dual_expert import DualExpertNet
 
 
 def parse_args():
@@ -55,9 +56,13 @@ def load_config(args):
             overrides[f.name] = val
 
     cfg_path = os.path.join(args.run_dir, "config.json")
+    valid_fields = {f.name for f in fields(TrainConfig)}
     if os.path.exists(cfg_path):
         with open(cfg_path) as f:
-            cfg = TrainConfig(**{**json.load(f), **overrides})
+            saved = json.load(f)
+        # 过滤旧版本 config.json 中已删除的字段 (如 use_bridge), 保证跨版本可复现
+        saved = {k: v for k, v in saved.items() if k in valid_fields}
+        cfg = TrainConfig(**{**saved, **overrides})
     elif args.exp is not None:
         cfg = TrainConfig(**{**EXPERIMENTS[args.exp],
                              "save_dir": args.run_dir, **overrides})
@@ -97,13 +102,19 @@ def main():
     print(f"val={len(val_dl.dataset)} "
           f"test={{{', '.join(f'{t}={len(test_dls[t].dataset)}' for t in test_terrs)}}}")
 
-    # ---- 模型: 与训练时同构, 加载两阶段权重 ----
-    model = RadioWNet(inputs=2, phase="secondU",
-                      use_causal=cfg.use_causal,
-                      num_domains=len(train_terrs) if cfg.use_causal else 0,
-                      causal_lambda_grl=cfg.causal_lambda_grl,
-                      use_causal_2nd=cfg.use_causal and cfg.dg_second).to(device)
-    ckpt_path = args.ckpt or os.path.join(args.run_dir, "Trained_Model_SecondU.pt")
+    # ---- 模型: 与训练时同构, 加载权重 ----
+    if cfg.arch == "dual":
+        model = DualExpertNet(inputs=2, num_domains=len(train_terrs),
+                              causal_lambda_grl=cfg.causal_lambda_grl).to(device)
+        default_ckpt = "Trained_Model_DualExpert.pt"
+    else:
+        model = RadioWNet(inputs=2, phase="secondU",
+                          use_causal=cfg.use_causal,
+                          num_domains=len(train_terrs) if cfg.use_causal else 0,
+                          causal_lambda_grl=cfg.causal_lambda_grl,
+                          use_causal_2nd=cfg.use_causal and cfg.dg_second).to(device)
+        default_ckpt = "Trained_Model_SecondU.pt"
+    ckpt_path = args.ckpt or os.path.join(args.run_dir, default_ckpt)
     state = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(state, strict=False)
     print(f"loaded: {ckpt_path}")
@@ -111,6 +122,7 @@ def main():
     # ---- 评估 ----
     print("\n===== Test: 分域评估 (firstU + secondU + gated) =====")
     report = evaluate_report(model, val_dl, test_dls, test_terrs, device)
+    report["arch"] = cfg.arch
 
     rep_path = args.report or os.path.join(args.run_dir, "dg_report.json")
     with open(rep_path, "w") as f:

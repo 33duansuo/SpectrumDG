@@ -46,18 +46,13 @@ skip 连接升级为 **CBAM 注意力精炼**，瓶颈层可插入 **CIRL 因果
 
 最终输出: conv_up0(80→20) → cat(layer00, x0) → conv_up00(40+2→20) → cat(x0) → conv_up000(20+2→1) → **output1** (1 通道)
 
-### 2.2 secondU（W-编码器 + 特征桥接 + W-解码器）
+### 2.2 secondU（W-编码器 + W-解码器）
 
-**输入**: cat(output1.detach(), x, feat_bridged) = 53 通道
+**输入**: cat(output1.detach(), x) = 3 通道
 - output1 (1ch): firstU 预测输出
 - x (2ch): 原始输入 (buildings + Tx 邻近图)
-- feat_bridged (50ch): firstU 编码器 layer5 特征 (CIRL 前) 经 1×1 卷积压缩 + 上采样
 
-**特征桥接 (feat_bridge)**:
-```
-firstU layer5 (500ch, 4×4) → Conv2d(500→50, 1×1) → BN → ReLU → Upsample(128×128)
-```
-解决 secondU 无法访问域特定信息的问题：CIRL 将 z_spe 丢弃，但 feat_bridge 保留了 CIRL 前的完整编码特征。
+> **特征桥接已移除**：早期版本 secondU 还拼接 50ch 的 `feat_bridged`（firstU layer5 (500ch) 经 Conv2d 1×1 压缩到 50ch + 上采样），用于向 secondU 传递 CIRL 前特征。2026-09-26 消融证明无收益（见 [validation_results.md](validation_results.md) §8.3），重构时代码已物理删除，当前输入仅 3 通道。
 
 **W-编码器**:
 
@@ -168,15 +163,13 @@ Stage 2: model.phase = "secondU"
 
 ## 6. 实验预设系统
 
-通过 `configs.py` 的 `EXPERIMENTS` 字典定义预设，命令行 `--exp` 选择:
+通过 `configs.py` 的 `EXPERIMENTS` 字典定义预设，命令行 `--exp` 选择（重构后只保留主线预设，历史消融预设已清理）:
 
 | 预设 | CIRL | Fish | 说明 |
 |---|---|---|---|
 | baseline | - | - | ERM 基线 |
-| causal | ✓ | - | 瓶颈层因果分解 |
-| fish | - | ✓ | 梯度对齐 |
-| fish_causal | ✓ | ✓ | 最优组合 (DG) |
-| dg_gate | ✓ | ✓ | DG + 门控 (Stage2 纯 ERM) |
+| dg_gate | ✓ | ✓ | 级联门控 (Stage2 纯 ERM) |
+| dual_expert | ✓（仅 dg 专家） | ✓（仅 dg 专家） | 双专家并行（当前主线，见 dual_expert.md） |
 
 命令行开关（`--use_causal`, `--use_fish`）可覆盖预设。
 
@@ -185,7 +178,8 @@ Stage 2: model.phase = "secondU"
 ```
 model/
 ├── __init__.py          # 包导出
-├── radiownet.py         # RadioWNet 双 U-Net 骨干 + 特征桥接
+├── radiownet.py         # RadioWNet 双 U-Net 骨干 (无桥接); CBAMUNet 单 U-Net 泛化专家
+├── dual_expert.py       # DualExpertNet 双专家并行组合
 ├── attention.py         # CBAM 注意力模块
 └── causal.py            # CIRL 因果分解 + GRL
 ```

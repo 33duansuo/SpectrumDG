@@ -175,6 +175,81 @@
 
 | 实验 | 说明 | 状态 |
 |---|---|---|
-| 消融实验 | 固定 CBAM 骨干，逐一开关 CIRL/Fish 的 secondU 贡献 | 待完成 |
+| 消融实验 | 固定 CBAM 骨干，逐一开关 CIRL/Fish/桥接/SWAD 的贡献 | 部分完成（见 §8） |
 | 软路由探索 | 在源域上训练轻量级路由器，输出概率分布 | 已否决（未见域数据不可见） |
 | 更多 DG 方法 | MixStyle、Group DRO 等与门控的组合 | 待探索 |
+| 双专家并行架构 | 独立域内专家 + 独立泛化专家联合训练，门控择优 | 已实现，4to7 验证中（见 [dual_expert.md](dual_expert.md)） |
+
+## 8. 2026-09-26 补充消融与分析
+
+### 8.1 口径说明
+
+- 旧报告（§2-§6）的 NMSE 为**逐 batch** `MSE(pred,tgt)/MSE(tgt,0)` 加权平均，训练结束时内嵌评估产生；9 月 26 日起评估流程统一输出 MAE/MSE/PSNR（[lib/evaluate.py](../lib/evaluate.py)），`test.py` 重评口径与旧内嵌评估有几个百分点差异。
+- 同日实验之间严格可比，以 **MSE** 为准；括号内给出按各场景固定分母换算的近似 NMSE，仅用于与 §2-§6 表格衔接。
+- 全部实验同协议：seed=42，4 城市训练，域内 val n=1856；Grassland n=1561、Desert n=5443、Mountainous n=848、Forest n=258。
+
+### 8.2 SWAD 移除后取得新最优
+
+在 dg_gate 配置上去掉 SWAD、训练预算由 200 轮收敛为 100 轮（patience=15），多物理先验门控重评：
+
+| 配置 | 域内 gated NMSE | 跨域 gated NMSE | Grassland | Desert | Mountainous | Forest |
+|---|---|---|---|---|---|---|
+| DG+多先验门控（含 SWAD，§6） | 0.2477 | 0.6122 | 0.3839 | 0.7911 | 0.8395 | 0.4345 |
+| **DG+多先验门控（去 SWAD）** | 0.2633 | **0.5678** | **0.3674** | **0.7300** | **0.7650** | **0.4086** |
+
+- 去 SWAD 后跨域再降 7.3%，四个自然场景全面改善；域内小幅退化（+6.3%）。
+- 与 §4.4 的早期判断一致：CIRL+Fish 双重正则已把解推向平坦区域，SWAD 权重平均无增益，反而因平均到后期过拟合点而略损泛化。
+- 产物：[run/cbam_dg_gate_nswad_4to4](../run/cbam_dg_gate_nswad_4to4/dg_report_multi_prior.json)。**该结果目前是级联方案的实际最好成绩**，README/§6 记载的 0.6122 已被刷新。
+
+### 8.3 特征桥接消融：桥接未带来收益（仅 CIRL 对照）
+
+同配置（CIRL only、Stage2 纯 ERM、100 轮）下对比有无 feat_bridge：
+
+| 配置 | 域内 secondU MSE | 域内 gated MSE | 跨域 firstU MSE | 跨域 gated MSE | 跨域 gated≈NMSE |
+|---|---|---|---|---|---|
+| causal + bridge | 0.01244 | 0.01283 | 0.03939 | 0.03944 | 0.674 |
+| **causal + no bridge** | **0.01155** | **0.01218** | **0.03687** | **0.03693** | **0.635** |
+
+- 无桥接在域内 secondU、域内 gated、跨域 firstU/gated 上**全部更优**。"把 CIRL 前特征传给 secondU 以弥补域信息丢失"的假设未被实验支持，桥接特征对纯 ERM 精修网络更像噪声。
+- 结论：桥接对最终性能无贡献，后续默认架构（含双专家）均不再使用；代码重构时 `use_bridge`/`feat_bridge` 已物理删除（旧带桥接 checkpoint 不再兼容加载）。
+
+### 8.4 Fish 消融：泛化增益确认，但 secondU 精修分支退化
+
+在 bridge 配置上加入 Fish（CIRL+Fish），与仅 CIRL 对比 firstU（泛化分支）：
+
+| 配置 | 跨域 firstU MSE | ≈NMSE | Grassland | Desert | Mountainous | Forest |
+|---|---|---|---|---|---|---|
+| causal + bridge | 0.03939 | 0.673 | 0.03539 | 0.04269 | 0.04000 | 0.03950 |
+| causal + no bridge | 0.03687 | 0.634 | 0.03118 | 0.04177 | 0.03825 | 0.03627 |
+| **Fish+CIRL + bridge** | **0.03355** | **0.580** | **0.02725** | **0.03844** | **0.03609** | **0.03243** |
+
+- Fish 在带桥接配置下仍把跨域 MSE 降低 9%-15%（Grassland -23%），与 §4.2 "前向 CIRL + 反向 Fish 互补"的结论一致，**Fish 确认为必选模块**。
+- **但同实验的 secondU 分支退化**：Stage 2 仅 15 轮触顶、epoch 30 早停；域内 secondU MSE=0.01455，反而差于 firstU 的 0.01451，跨域二者也基本持平（0.03388 vs 0.03355）。强 DG firstU 的输出已足够好，secondU 精修无空间，双分支退化为单分支。
+
+### 8.5 阶段性结论与架构转向
+
+1. **模块取舍**：保留 CBAM、CIRL、Fish、多物理先验门控；移除 MixStyle、SWAD；特征桥接消融未见增益，弃用。
+2. **级联方案的结构性矛盾**：DG 正则与域内精修被绑在同一条级联链上——firstU 越强（加 Fish），secondU 越没有存在价值；firstU 越弱，域内又保不住。两阶段训练无法解耦这两个目标。
+3. **架构转向**：改为**双专家并行**——域内专家（纯 ERM RadioWNet）与泛化专家（CBAM 单 U-Net + CIRL + Fish）各自独立训练，门控只负责择优。设计、训练与推理细节见 [dual_expert.md](dual_expert.md)，代码为 `--exp dual_expert`（[model/dual_expert.py](../model/dual_expert.py)）。
+
+### 8.6 双专家 4to7 实验
+
+测试集扩展为 **7 个未见场景（11 场景全利用）**：在原 4 陆地自然场景（01/09/10/11）基础上新增 3 个水域场景 02.Island(n=3188)、03.Ocean(n=2754)、04.Lake(n=5062)；训练域不变（4 城市，n_train=10516 / n_val=1856）。MSE 按场景分别报告，4to7 总体值与历史 4to4 口径（0.5678）不直接可比。
+
+| 指标 | expert_in（域内） | expert_dg（泛化） | gated | gate→in 比例 |
+|---|---|---|---|---|
+| 域内 MSE / NMSE | 训练中 | 训练中 | 训练中 | — |
+| Grassland (n=1561) | — | — | — | — |
+| Island (n=3188) | — | — | — | — |
+| Ocean (n=2754) | — | — | — | — |
+| Lake (n=5062) | — | — | — | — |
+| Desert (n=5443) | — | — | — | — |
+| Mountainous (n=848) | — | — | — | — |
+| Forest (n=258) | — | — | — | — |
+| 跨域平均（7 场景） | — | — | — | — |
+| 陆地 4 场景均值（对齐 4to4 口径） | — | — | — | — |
+
+- 状态：2026-09-26 启动，产物目录 `run/dual_expert_4to7/`（精简日志 `train_loss_dual.log` 仅 4 列 `train_avg_in/train_avg_dg/val_avg_in/val_avg_dg`，CIRL 辅助损失只在控制台 `run/dual_expert_4to7_nohup.out` 打印），完成后回填本表。
+- 链路已通过小样本冒烟验证：联合训练、独立选优、7 场景多先验门控、test.py 复现评估均正常；门控物理行为符合预期（Ocean/Lake 无建筑 → 0% 路由域内专家，Island 约 44% 样本有建筑痕迹 → 路由域内专家）。
+- 注：同日早些时候曾启动 4to4 版本（仅 4 陆地测试场景、7 列日志），应用户要求在 epoch 3 后停止并删除产物，统一以 4to7 协议为准。
+
