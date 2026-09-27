@@ -25,10 +25,9 @@
             output_in (output2)                  output_dg
                 └─────────────────┬──────────────────┘
                                   ▼
-                     多物理先验 v4 门控（零训练）
-              bldg_strong OR (elev_low AND bldg_weak)
-                    ├─ True  → output_in（像源域 → 域内专家）
-                    └─ False → output_dg（像未见域 → 泛化专家）
+                  BinaryRouter 门控（学习式，当前主线）
+              score(bldg, terrain) ≥ τ → output_in，否则 output_dg
+              （v4 物理规则门控保留为零训练对照，见 gate_mechanism.md）
 ```
 
 - **expert_in**：[RadioWNet](../model/radiownet.py)（firstU+secondU 级联，14 个 CBAM 模块），**纯 ERM**，结构与训练目标完全对齐 CBAM 基线（无桥接、无 CIRL），域内 NMSE 目标复现基线 0.2209 水平。
@@ -57,52 +56,59 @@ L = MSE(o1_in, t) + MSE(o2_in, t)          # 域内专家: firstU+secondU 都受
 
 ## 4. 推理路由
 
-直接复用多物理先验 v4 规则（建筑覆盖率+连通分量、地形高程，详见 [gate_mechanism.md](gate_mechanism.md)），**无需任何重训**：
+门控为独立训练的 **BinaryRouter**（2026-09-27 起为主线；协议、训练与分析详见 [gate_mechanism.md](gate_mechanism.md) §5、§8）：
 
-| 判定 | 路由 | 含义 |
-|---|---|---|
-| bldg_cov>0.01 或 bldg_ncomp>5 | expert_in | 强城市特征，域内专家最优 |
-| elev_mean<100 且（有建筑痕迹） | expert_in | 低海拔低密度城区 |
-| 其余（高海拔/无建筑） | expert_dg | 自然地形，泛化专家最优 |
+- 轻量二分类 CNN（0.39M 参数），输入 (bldg, terrain_yx)，输出源域 score；score ≥ τ(=0.4055) → expert_in，否则 → expert_dg。
+- test-time-geo 协议：目标域频谱不可见、地形公开；Router 以 4 城市真实地形为正样本、7 目标场景真实地形为负样本训练，双专家本身仍对目标域频谱零样本。
+- v4 物理规则门控（`bldg_strong OR (elev_low AND bldg_weak)`）保留在 [lib/evaluate.py](../lib/evaluate.py) 中作为零训练对照（`test.py` 不传 `--router` 时使用），4to7 上 Island 误路由 52.7%，已被 Router 替代。
 
-评估输出键沿用 firstU/secondU/gated 命名，含义映射为：`firstU = expert_dg`，`secondU = expert_in`，报告 JSON 增加 `"arch": "dual"` 标记。
+评估输出键沿用 firstU/secondU/gated 命名，含义映射为：`firstU = expert_dg`，`secondU = expert_in`，报告 JSON 增加 `"arch": "dual"` 与 `"gate": {"type": "router", "tau": ...}` 标记。
 
-## 5. 预期性质
+## 5. 实测性质（4to7，Router 门控）
 
-1. **域内性能有保底**：即使约 10% 域内样本被误路由到 expert_dg，expert_dg 本身也是完整的强网络（域内 NMSE ~0.28-0.30），gated 域内结果是"0.22 为主 + 少量 0.30"的加权混合，不会像"弱精修网络被误选中"那样大幅塌陷；同时 expert_in 完全不经受 DG 正则，其上限就是基线 0.2209。
-2. **跨域性能不妥协**：expert_dg 的训练目标与此前最优 firstU 完全一致（单 U-Net + CIRL + Fish，无 SWAD），在原 4 个陆地自然场景上跨域 NMSE 预期保持 0.57 左右；4to7 新增的 3 个水域场景按场景单独报告。跨域场景仅 0-3% 误路由到 expert_in（Island 等含建筑痕迹的场景除外）。
-3. **误路由代价对称化**：级联方案中误路由到的 secondU 跨域 NMSE 高达 0.75-1.09；双专家方案中无论往哪个方向误路由，选中的都是该方向上的强专家，代价显著降低。
-4. **训练预算可控**：单阶段联合训练（参数量 24.74M，约为级联两网络之和），一次早停即可完成，无需两阶段串行。
+1. **域内基本保住**：gated 域内 MSE 0.01155（expert_in 裸跑 0.01097，expert_dg 裸跑 0.01406）；4.9% 误路由全部来自 Suburban 无建筑 patch，代价有限。
+2. **跨域接近泛化专家下界**：gated 跨域均值 0.03180，expert_dg 裸跑 0.03170；5 个场景与裸跑完全一致，Lake/Desert 仅差 0.0002-0.0004。
+3. **误路由代价对称化兑现**：expert_in 跨域 MSE 0.04521（级联 secondU 时代 0.75-1.09 NMSE 的塌陷不再出现），Router 把目标域误路由率压到 1.55%，Island 由 v4 的 52.7% 降到 0.5%。
+4. **训练预算可控**：单阶段联合训练（参数量 24.74M），一次早停完成；Router 训练另需 50 epoch（数分钟，0.39M 参数）。
 
 ## 6. 实验设置（4to7，11 场景全利用）
 
 - **训练域（4 城市，n_train=10516 / n_val=1856）**：05.Suburban, 06.DenseUrban, 07.Rural, 08.OrdinaryUrban
 - **跨域测试（7 未见场景，n=19114）**：
 
-| 类别 | 场景 | z00 样本数 | 门控预期路由 |
+| 类别 | 场景 | z00 样本数 | Router 实测路由到 expert_in |
 |---|---|---|---|
-| 陆地自然（原 4to4） | 01.Grassland | 1561 | expert_dg |
-| 陆地自然（原 4to4） | 09.Desert | 5443 | expert_dg |
-| 陆地自然（原 4to4） | 10.Mountainous | 848 | expert_dg（高海拔） |
-| 陆地自然（原 4to4） | 11.Forest | 258 | expert_dg |
-| 水域（新增） | 02.Island | 3188 | 部分样本有建筑痕迹 → 少量路由 expert_in |
-| 水域（新增） | 03.Ocean | 2754 | expert_dg（高程全 0、无建筑） |
-| 水域（新增） | 04.Lake | 5062 | expert_dg（低海拔、无建筑） |
+| 陆地自然（原 4to4） | 01.Grassland | 1561 | 0% |
+| 陆地自然（原 4to4） | 09.Desert | 5443 | 2.2% |
+| 陆地自然（原 4to4） | 10.Mountainous | 848 | 0% |
+| 陆地自然（原 4to4） | 11.Forest | 258 | 0% |
+| 水域（新增） | 02.Island | 3188 | 0.5%（v4 规则曾误路由 52.7%） |
+| 水域（新增） | 03.Ocean | 2754 | 0%（高程全 0、无建筑） |
+| 水域（新增） | 04.Lake | 5062 | 3.2%（低海拔平坦水面边界样本） |
 
 > 口径注意：新增 3 个水域场景与城市传播机制差异极大，4to7 的总体跨域 MSE 与历史 4to4 NMSE（0.5678）不直接可比；报告按场景分别列出，对比时以同协议、同场景集合为准。
 
 ## 7. 用法
 
 ```bash
-# 训练（默认配置即 4 城市 → 7 未见场景；train_terrains/test_terrains 均可显式覆盖）
+# 1) 双专家训练（默认配置即 4 城市 → 7 未见场景；train_terrains/test_terrains 均可显式覆盖）
 CUDA_VISIBLE_DEVICES=4 python train.py --exp dual_expert \
   --save_dir run/dual_expert_4to7
 
-# 从 checkpoint 复现评估（自动多物理先验门控）
+# 2) 训练门控 Router（test-time-geo: 源域/目标域真实地形二分类, 仅数分钟）
+CUDA_VISIBLE_DEVICES=5 python train_router_bin.py
+#    → run/router_realood/RouterBin.pt, 训练结束打印 tau@95 (=0.4055)
+
+# 3) Router 门控评估（当前主线）
+python test.py --run_dir run/dual_expert_4to7 \
+  --router run/router_realood/RouterBin.pt --tau 0.4055 \
+  --report run/dual_expert_4to7/dg_report_router.json
+
+# 3') v4 规则门控对照（零训练，不传 --router）
 python test.py --run_dir run/dual_expert_4to7
 ```
 
-产物：`Trained_Model_DualExpert.pt`（两专家权重）、`checkpoint_dual.pt`（续训用）、`train_loss_dual.log`（每 epoch 一行 4 列：`train_avg_in / train_avg_dg / val_avg_in / val_avg_dg`；CIRL 的 dom/inv/orth 辅助损失仅在控制台打印用于诊断）、`dg_report.json`（含两专家及 gated 三套 MAE/MSE/PSNR 与门控路由比例）。
+产物：`Trained_Model_DualExpert.pt`（两专家权重）、`checkpoint_dual.pt`（续训用）、`train_loss_dual.log`（每 epoch 一行 4 列：`train_avg_in / train_avg_dg / val_avg_in / val_avg_dg`；CIRL 的 dom/inv/orth 辅助损失仅在控制台打印用于诊断）、`dg_report.json`（v4 门控）与 `dg_report_router.json`（Router 门控，含两专家及 gated 三套 MAE/MSE/PSNR 与门控路由比例）。
 
 ## 8. 与级联门控方案的对照
 
@@ -112,5 +118,9 @@ python test.py --run_dir run/dual_expert_4to7
 | 泛化分支 | firstU（级联第一级） | 独立 CBAMUNet |
 | 训练流程 | 两阶段串行，各自早停 | 单阶段联合，独立选优+联合早停 |
 | DG 正则施加 | firstU | 仅 expert_dg |
-| 误路由到的网络强度 | secondU 跨域弱（0.75-1.09） | 两方向均为专职强专家 |
-| 域内 best NMSE | 0.2633（gated）/ 0.2468（secondU） | 目标 ≈ 基线 0.22 水平（待结果验证） |
+| 误路由到的网络强度 | secondU 跨域弱（0.75-1.09） | 两方向均为专职强专家（expert_in 跨域 MSE 0.0452） |
+| 门控 | v4 物理规则（4to4 90.7% 准确） | **BinaryRouter 学习式**（4to7 源域误路由 4.9%/目标 1.55%；v4 保留对照） |
+| 域内 best（4to7 MSE） | — | 0.01097（expert_in 裸）/ 0.01155（gated） |
+| 跨域 best（4to7 MSE） | — | 0.03170（expert_dg 裸）/ **0.03180（gated）**，vs 纯 ERM 基线 0.04443 **−28.4%** |
+
+> 4to7 与 4to4 场景集/指标口径不同（MSE vs 旧 NMSE），不与级联 0.2633/0.5678 直接比大小。

@@ -44,6 +44,11 @@ def parse_args():
     p.add_argument("--num_workers", type=int, default=None)
     p.add_argument("--max_per_terrain", type=int, default=None)
     p.add_argument("--report", type=str, default=None, help="DG 报告 JSON 路径; 默认 {run_dir}/dg_report.json")
+    # Router 门控 (不给则默认多物理先验 v4 规则)
+    p.add_argument("--router", type=str, default=None,
+                   help="RouterBin.pt 路径 (train_router_bin.py 产物); 给出则用学习式门控替代 v4 规则")
+    p.add_argument("--tau", type=str, default="auto",
+                   help="Router 门控阈值; 'auto' = val 集 95%% 召回自动校准, 或浮点数")
     return p.parse_args()
 
 
@@ -119,9 +124,22 @@ def main():
     model.load_state_dict(state, strict=False)
     print(f"loaded: {ckpt_path}")
 
+    # ---- Router 门控 (可选; 默认 v4 规则) ----
+    router, tau = None, None
+    if args.router is not None:
+        from model.router import BinaryRouter
+        rckpt = torch.load(args.router, map_location=device)
+        router = BinaryRouter(width=rckpt.get("width", 32)).to(device)
+        router.load_state_dict(rckpt["state_dict"])
+        router.eval()
+        tau = None if args.tau == "auto" else float(args.tau)
+        print(f"loaded router: {args.router} "
+              f"(protocol={rckpt.get('protocol', '?')}, tau={'auto' if tau is None else tau})")
+
     # ---- 评估 ----
     print("\n===== Test: 分域评估 (firstU + secondU + gated) =====")
-    report = evaluate_report(model, val_dl, test_dls, test_terrs, device)
+    report = evaluate_report(model, val_dl, test_dls, test_terrs, device,
+                             router=router, tau=tau)
     report["arch"] = cfg.arch
 
     rep_path = args.report or os.path.join(args.run_dir, "dg_report.json")

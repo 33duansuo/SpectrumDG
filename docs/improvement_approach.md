@@ -128,7 +128,7 @@ python train.py --exp baseline --use_causal --causal_lambda_inv 0.05 --save_dir 
 **双专家并行方案（当前主线，`--exp dual_expert`）**：
 - expert_in：纯 ERM CBAM RadioWNet（无桥接），专职域内
 - expert_dg：CBAM 单 U-Net + CIRL + Fish，专职跨域
-- 单阶段联合训练，多物理先验门控推理择优
+- 单阶段联合训练；推理由 **BinaryRouter 学习式门控**择优（test-time-geo 协议：4 城市真实地形为正样本、7 目标场景真实地形为负样本，目标域频谱零接触，见 [gate_mechanism.md](gate_mechanism.md)）；多物理先验 v4 规则保留为零训练对照
 
 **数据划分**（默认配置，11 场景全利用）：
 - 训练域（4 城市）：05.Suburban, 06.DenseUrban, 07.Rural, 08.OrdinaryUrban

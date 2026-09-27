@@ -3,6 +3,7 @@ from .attention import CBAM, ChannelAttention, SpatialAttention
 from .causal import CausalDecomposer, GRL
 from .radiownet import CBAMUNet, RadioWNet
 from .dual_expert import DualExpertNet
+from .router import BinaryRouter
 
 __all__ = [
     "CBAM",
@@ -13,4 +14,5 @@ __all__ = [
     "CBAMUNet",
     "RadioWNet",
     "DualExpertNet",
+    "BinaryRouter",
 ]
